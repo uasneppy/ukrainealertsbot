@@ -49,7 +49,7 @@ const getLaunchOptions = () => {
 let activeBrowser = null;
 
 async function getOrLaunchBrowser() {
-  if (activeBrowser && activeBrowser.isConnected()) {
+  if (activeBrowser) {
     return activeBrowser;
   }
 
