@@ -43,6 +43,39 @@ const getLaunchOptions = () => {
   return cachedLaunchOptionsPromise;
 };
 
+// Persistent browser — reused across requests to avoid cold-start on every message.
+// Reset to null on disconnect so the next request relaunches cleanly.
+let activeBrowser = null;
+
+async function getOrLaunchBrowser() {
+  if (activeBrowser && activeBrowser.isConnected()) {
+    return activeBrowser;
+  }
+
+  const options = await getLaunchOptions();
+
+  activeBrowser = await puppeteer.launch({
+    ...options,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-infobars',
+      '--disable-web-security',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--js-flags=--max-old-space-size=4096',
+      ...(options.args || []),
+    ],
+  });
+
+  activeBrowser.on('disconnected', () => {
+    activeBrowser = null;
+  });
+
+  return activeBrowser;
+}
+
 export const TARGET_VIEWPORT = Object.freeze({ width: 2560, height: 1440, deviceScaleFactor: 1 });
 export const DEFAULT_CROP_PADDING = 70;
 export const ALERT_CANVAS_SELECTORS = Object.freeze([
@@ -220,37 +253,24 @@ if (token) {
 
     if (!text.includes('тривога')) return;
 
-    let browser;
+    // Acknowledge immediately so the user sees a response right away
+    bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
+
     let page;
 
     try {
-      const options = await getLaunchOptions();
-
-      browser = await puppeteer.launch({
-        ...options,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--disable-infobars',
-          '--disable-web-security',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--js-flags=--max-old-space-size=4096',
-          ...(options.args || []),
-        ],
-      });
+      const browser = await getOrLaunchBrowser();
 
       page = await browser.newPage();
       await applyViewport(page);
 
       await page.goto('https://alerts.in.ua/', {
         waitUntil: 'domcontentloaded',
-        timeout: 60000,
+        timeout: 30000,
       });
 
-      // Дай сторінці трохи часу підвантажити карту
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      // Wait for the map canvas to appear instead of a fixed sleep
+      await waitForAnySelector(page, ALERT_CANVAS_SELECTORS, { timeout: 8000 });
 
       const buffer = await captureCroppedScreenshot(page);
       await bot.sendPhoto(chatId, buffer);
@@ -263,11 +283,7 @@ if (token) {
           await page.close();
         } catch {}
       }
-      if (browser) {
-        try {
-          await browser.close();
-        } catch {}
-      }
+      // Browser stays alive for the next request — no browser.close() here
     }
   });
 }
