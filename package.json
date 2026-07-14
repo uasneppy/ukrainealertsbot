@@ -8,6 +8,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@sparticuz/chromium": "^149.0.0",
     "dotenv": "^17.4.2",
     "node-telegram-bot-api": "^1.2.0",

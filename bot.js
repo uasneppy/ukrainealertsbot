@@ -4,6 +4,7 @@ import chromium from '@sparticuz/chromium';
 import dotenv from 'dotenv';
 
 import { fetchLatestChannelMessages, formatChannelMessages } from './channelMessages.js';
+import { analyzeAlertMessages } from './geminiAnalysis.js';
 
 dotenv.config();
 
@@ -84,7 +85,7 @@ export const ALERT_CANVAS_SELECTORS = Object.freeze([
   'canvas',
 ]);
 export const CHANNEL_MESSAGE_TRIGGER = 'чому тривога';
-export const CHANNEL_MESSAGE_LIMIT = 10;
+export const CHANNEL_MESSAGE_LIMIT = 20;
 
 export async function applyViewport(page, viewport = TARGET_VIEWPORT) {
   if (!page || typeof page.setViewport !== 'function') {
@@ -242,11 +243,20 @@ if (token) {
     const chatId = msg.chat.id;
 
     if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
+      bot.sendChatAction(chatId, 'typing').catch(() => {});
       try {
-        await handleChannelMessageRequest({ botInstance: bot, chatId });
+        const messages = await fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT });
+        const analysis = await analyzeAlertMessages(messages);
+        await bot.sendMessage(chatId, analysis);
       } catch (error) {
-        console.error('Failed to send channel messages:', error);
-        await bot.sendMessage(chatId, 'Не вдалося отримати повідомлення з каналу @kpszsu.');
+        console.error('Failed to analyse alert messages:', error);
+        // Gemini failed — fall back to sending the raw channel messages
+        try {
+          await handleChannelMessageRequest({ botInstance: bot, chatId, limit: CHANNEL_MESSAGE_LIMIT });
+        } catch (fallbackError) {
+          console.error('Fallback also failed:', fallbackError);
+          await bot.sendMessage(chatId, 'Не вдалося отримати інформацію з каналу @kpszsu.');
+        }
       }
       return;
     }
