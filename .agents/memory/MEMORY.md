@@ -1,1 +1,2 @@
 - [Puppeteer Chromium on Replit & Docker](puppeteer-chromium-env.md) — npm-bundled & @sparticuz Chromium fail on NixOS/slim; use system chromium + emoji/Cyrillic fonts.
+- [npm "Exit handler never called!" in Docker](npm-ci-docker-crash.md) — intermittent `npm ci` crash is host-side (RAM/disk/cache), not a code/lock bug; reproduce in a clean base image first.

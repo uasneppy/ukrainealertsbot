@@ -29,7 +29,12 @@ WORKDIR /app
 
 # ── Dependencies (own layer for cache reuse) ──────────────────────────────────
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# --no-audit / --no-fund cut npm's extra work: audit does a network round-trip and
+# builds a second dependency graph, a common trigger for the intermittent
+# "Exit handler never called!" npm crash on memory/disk-constrained build hosts.
+# The BuildKit cache mount keeps ~/.npm across builds so retries are fast and
+# self-healing against a corrupted download cache.
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund
 
 # ── Application source ────────────────────────────────────────────────────────
 COPY . .
