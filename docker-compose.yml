@@ -5,6 +5,13 @@ services:
     container_name: alerts-bot
     # Keep the bot up across crashes and host reboots.
     restart: unless-stopped
+    # Cap log growth — a long-running bot logs continuously; default json-file
+    # logging is unbounded and can fill the host disk over time.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       # Provide these in a local .env file (see .env.example) or the host shell.
       # `:?` makes `docker compose up` fail fast with a clear message if the
