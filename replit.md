@@ -27,7 +27,7 @@ npm test
 
 ## Docker
 
-The project ships with a `Dockerfile`, `.dockerignore`, and `docker-compose.yml`. The image is based on `node:20-slim` and installs **system Chromium** (plus Cyrillic + emoji fonts) so Puppeteer works in the container — `neptun/browser.js` picks it up via `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`.
+The project ships with a `Dockerfile`, `.dockerignore`, and `docker-compose.yml`. The image is based on `node:22-slim` (LTS — matches the engine requirements of `puppeteer@25` and `@sparticuz/chromium`) and installs **system Chromium** (plus Cyrillic + emoji fonts) so Puppeteer works in the container — `neptun/browser.js` picks it up via `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`.
 
 Run with Docker Compose (reads `BOT_TOKEN` / `GEMINI_API_KEY` from a local `.env` — see `.env.example`):
 

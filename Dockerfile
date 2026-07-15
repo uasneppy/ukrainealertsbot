@@ -3,7 +3,9 @@
 # ── Base ──────────────────────────────────────────────────────────────────────
 # Debian "slim" is the right base for Puppeteer — Alpine/musl has known
 # Chromium compatibility issues.
-FROM node:20-slim
+# Node 22 (LTS) satisfies the engine requirements of puppeteer@25 (>=22.12) and
+# @sparticuz/chromium (>=22.17); Node 20 only produces EBADENGINE warnings.
+FROM node:22-slim
 
 # ── System dependencies ───────────────────────────────────────────────────────
 # Chromium (for Puppeteer) + fonts. The map renders Ukrainian (Cyrillic) text and
