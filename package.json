@@ -12,7 +12,8 @@
     "@sparticuz/chromium": "^149.0.0",
     "dotenv": "^17.4.2",
     "node-telegram-bot-api": "^1.2.0",
-    "puppeteer": "^25.3.0"
+    "puppeteer": "^25.3.0",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "vitest": "^4.1.10"

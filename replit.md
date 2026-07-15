@@ -1,12 +1,13 @@
 # Air Raid Alerts Telegram Bot
 
-A Node.js Telegram bot that screenshots the live [alerts.in.ua](https://alerts.in.ua/) map and sends it to a group chat whenever someone writes **"тривога"**. Also responds to **"чому тривога"** with the latest posts from the [@kpszsu](https://t.me/s/kpszsu) Telegram channel.
+A Node.js Telegram bot that monitors Ukrainian air-threat data from **NEPTUN** (neptun.in.ua) and screenshots the live [alerts.in.ua](https://alerts.in.ua/) map, responding to group chat messages.
 
 ## Stack
 
 - **Node.js 20** (ESM)
-- **Puppeteer** + **@sparticuz/chromium** — headless browser for map screenshots
+- **Puppeteer** + system **Chromium** (NixOS) — headless browser for map rendering
 - **node-telegram-bot-api** — Telegram polling
+- **ws** — WebSocket client for the NEPTUN live stream
 - **dotenv** — environment config
 - **vitest** — unit tests
 
@@ -24,19 +25,45 @@ The bot requires a `BOT_TOKEN` environment variable (set it via Replit Secrets).
 npm test
 ```
 
+## Bot commands & triggers
+
+| Trigger | Response |
+|---|---|
+| `/map` | Renders a NEPTUN threat map on demand (REST fetch) |
+| `тривога` (any case) | Renders the live NEPTUN threat map (WebSocket state, cached 60 s) |
+| `чому тривога` | Fetches latest @kpszsu channel posts + Gemini AI analysis |
+
 ## Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
 | `BOT_TOKEN` | ✅ | Telegram bot token from @BotFather |
+| `GEMINI_API_KEY` | ❌ | Enables Gemini AI analysis for "чому тривога" |
 | `CHROME_EXECUTABLE_PATH` | ❌ | Override Chromium path (auto-detected otherwise) |
 | `PUPPETEER_EXECUTABLE_PATH` | ❌ | Alternative Chromium path override |
 
 ## Architecture notes
 
-- **Persistent browser** — a single Chromium instance is kept alive across requests (auto-relaunched on disconnect). This removes the ~3–5 s cold-start penalty on every "тривога" message.
-- **Canvas-aware waiting** — instead of a fixed sleep, the bot waits for the map canvas element to appear in the DOM before screenshotting, so it responds as soon as the map is ready.
-- **Immediate feedback** — `sendChatAction('upload_photo')` is fired right away so users see the "sending photo…" indicator while the screenshot is being taken.
+### NEPTUN integration (`neptun/`)
+
+- **`fetchGeo.js`** — Downloads `ukraine.geojson`, `oblasts.geojson`, `raions.geojson` from neptun.in.ua once and caches them in `neptun/geo/` (excluded from git). In-process cache avoids repeated disk reads.
+- **`neptunApi.js`** — REST helpers: `fetchThreats()`, `fetchAlerts()`, `fetchSnapshot()`. Used by `/map` and as a fallback when the stream hasn't connected yet.
+- **`neptunStream.js`** — WebSocket client for `wss://neptun.in.ua/api/v1/stream`. Handles `snapshot / upsert / remove / alerts / heartbeat` messages. Reconnects with exponential backoff (1 s → 30 s cap). Exports `startStream()` and `getState()`.
+- **`mapRenderer.js`** — Renders the threat map as a PNG using Puppeteer + Leaflet (CDN). Oblast/raion boundaries are drawn from cached GeoJSON; alerted regions are highlighted red; threats are colored circles by type. Exports `renderNeptunMap({ threats, alerts, geo })`.
+- **`browser.js`** — Shared Puppeteer browser singleton. Resolution order: env override → system `chromium` (NixOS/Replit) → `@sparticuz/chromium` (Lambda) → Puppeteer auto-detect.
+
+### Caching
+
+- **NEPTUN map** — rendered PNG cached for 60 s; background refresh at 30 s. Served instantly on "тривога".
+- **Gemini analysis** — cached for 2 min with background refresh at 1 min.
+
+### Startup pre-warm
+
+On `npm start` the bot:
+1. Launches the Chromium browser
+2. Starts the NEPTUN WebSocket stream
+3. Downloads GeoJSON boundary files (or loads from cache)
+4. Kicks off the first map render and Gemini analysis in the background
 
 ## User preferences
 
