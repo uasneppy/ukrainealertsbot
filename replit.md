@@ -48,6 +48,12 @@ Notes:
 - The bot is a **polling worker** — it exposes no inbound port.
 - The GeoJSON cache is downloaded on first run; Compose persists it in a named volume (`geo-cache`) so it survives restarts.
 - Secrets are never baked into the image (`.env` is excluded via `.dockerignore`); pass them at runtime.
+- **Requires BuildKit** — the `Dockerfile` uses a `--mount=type=cache` on the npm install layer. Docker Compose v2 and modern `docker build` enable BuildKit by default; on older Docker, prefix the build with `DOCKER_BUILDKIT=1`.
+
+### Troubleshooting
+
+- **`npm error Exit handler never called!` during `RUN npm ci`** — this is a host-side npm crash (low memory, low disk, or a corrupt build cache), **not** a repo/lockfile bug (the same `npm ci` installs cleanly in a clean `node:22-slim`). Fix on the build host: run `docker builder prune -f` and rebuild with `--no-cache`, give Docker ≥4 GB memory, and free disk (`docker system prune`, check `docker system df`).
+- **`ERR_MODULE_NOT_FOUND` for `node-telegram-bot-api`** — you're running a stale image built on Node 20 with an older dependency. Rebuild fresh: `docker compose up -d --build`.
 
 ## Bot commands & triggers
 

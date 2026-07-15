@@ -1,20 +1,16 @@
 ---
 name: npm "Exit handler never called!" in Docker builds
-description: Diagnosing the intermittent npm ci crash during Docker builds — it is host-side, not a code/lockfile bug.
+description: The intermittent npm ci crash during Docker builds is host-side, not a code/lockfile bug.
 ---
 
 # npm "Exit handler never called!" during `npm ci` in Docker
 
-**Symptom:** `docker build` fails at `RUN npm ci …` with `npm error Exit handler never called! This is an error with npm itself`, exit code 1. The step often runs unusually long (e.g. ~70s) before crashing.
+**Symptom:** `docker build` fails at `RUN npm ci …` with `npm error Exit handler never called! This is an error with npm itself` (exit 1), often after the step has run unusually long.
 
-**What it is NOT:** not a lockfile mismatch, dependency problem, or Dockerfile bug. "Exit handler never called!" is npm terminating abnormally before its own exit handler runs — an *environment-side* failure on the build host.
+**Durable lesson:** this is npm terminating abnormally before its own exit handler runs — an *environment-side* failure on the build host (out of memory, out of disk / ENOSPC, or a corrupted BuildKit / npm cache). It is NOT a lockfile, dependency, or Dockerfile defect.
 
-**Most common real causes (in order):** out of memory (Docker Desktop RAM too low), out of disk / ENOSPC mid-install, or a corrupted BuildKit / npm build cache.
+**Confirm before editing the Dockerfile:** reproduce `npm ci` in a clean base image with the same Node/npm and the same `package.json` + `package-lock.json`. If it installs cleanly there, the repo is fine and the fix is host-side — don't chase a phantom code bug.
 
-**Verify before touching the Dockerfile:** reproduce `npm ci` in a clean base image with the *same* Node/npm and the same `package.json` + `package-lock.json`. If it builds clean there, the Dockerfile is fine and the fix is host-side. (Confirmed once: 46 pkgs, 0 vuln, ~4s on `node:22-slim` / npm 10.9.8 — while the user's host crashed at ~70s.)
+**Host remediation:** `docker builder prune -f` then rebuild `--no-cache`; raise Docker memory (≥4GB); free disk (`docker system prune`, check `docker system df`).
 
-**Why:** chasing this as a code/lock bug wastes effort; the reproduce-in-clean-base test decisively separates host issues from repo issues.
-
-**Host remediation to give the user:** `docker builder prune -f` then rebuild with `--no-cache`; raise Docker memory to ≥4GB; `docker system prune` / check `docker system df` for disk.
-
-**Dockerfile hardening (reduces the trigger surface):** `RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund` — `--no-audit`/`--no-fund` cut npm's extra graph-building + network work; the cache mount makes retries fast and self-heals a corrupt download cache. Requires BuildKit (compose v2 enables it by default).
+**Dockerfile hardening (reduces the trigger surface; requires BuildKit, which compose v2 enables by default):** `RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund` — trims npm's audit/fund work and makes retries fast + self-healing against a corrupt download cache.
