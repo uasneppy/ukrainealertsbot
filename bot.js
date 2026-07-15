@@ -77,7 +77,7 @@ async function getOrLaunchBrowser() {
   return activeBrowser;
 }
 
-export const TARGET_VIEWPORT = Object.freeze({ width: 2560, height: 1440, deviceScaleFactor: 1 });
+export const TARGET_VIEWPORT = Object.freeze({ width: 1280, height: 800, deviceScaleFactor: 1 });
 export const DEFAULT_CROP_PADDING = 70;
 export const ALERT_CANVAS_SELECTORS = Object.freeze([
   '#alerts-map canvas',
@@ -105,7 +105,7 @@ export async function applyViewport(page, viewport = TARGET_VIEWPORT) {
   await page.setViewport({ width, height, deviceScaleFactor });
 }
 
-export async function captureCroppedScreenshot(page, padding = DEFAULT_CROP_PADDING) {
+export async function captureCroppedScreenshot(page, padding = DEFAULT_CROP_PADDING, type = 'png') {
   if (!page || typeof page.screenshot !== 'function' || typeof page.viewport !== 'function') {
     throw new Error('A Puppeteer page with viewport and screenshot is required');
   }
@@ -127,7 +127,7 @@ export async function captureCroppedScreenshot(page, padding = DEFAULT_CROP_PADD
   }
 
   return page.screenshot({
-    type: 'png',
+    type,
     clip: {
       x: padding,
       y: padding,
@@ -235,8 +235,84 @@ export async function handleChannelMessageRequest({
   await botInstance.sendMessage(chatId, formatted, { disable_web_page_preview: true });
 }
 
+// ── Screenshot cache ──────────────────────────────────────────────────────────
+// The map is refreshed in the background every 30 s so user requests are
+// served from cache and respond in under a second.
+const SCREENSHOT_TTL_MS = 30_000;
+let screenshotCache = { buffer: null, takenAt: 0, refreshing: false };
+
+async function refreshScreenshotCache() {
+  if (screenshotCache.refreshing) return;
+  screenshotCache.refreshing = true;
+  let page;
+  try {
+    const browser = await getOrLaunchBrowser();
+    page = await browser.newPage();
+    await applyViewport(page);
+    await page.goto('https://alerts.in.ua/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForAnySelector(page, ALERT_CANVAS_SELECTORS, { timeout: 8000 });
+    const buffer = await captureCroppedScreenshot(page, DEFAULT_CROP_PADDING, 'jpeg');
+    screenshotCache.buffer = buffer;
+    screenshotCache.takenAt = Date.now();
+    console.log('Screenshot cache refreshed');
+  } catch (err) {
+    console.error('Screenshot refresh failed:', err);
+  } finally {
+    screenshotCache.refreshing = false;
+    if (page) { try { await page.close(); } catch {} }
+  }
+}
+
+async function getCachedScreenshot() {
+  const age = Date.now() - screenshotCache.takenAt;
+  if (screenshotCache.buffer && age < SCREENSHOT_TTL_MS) {
+    // Serve from cache; kick off a background refresh when half-stale
+    if (age > SCREENSHOT_TTL_MS / 2) refreshScreenshotCache().catch(console.error);
+    return screenshotCache.buffer;
+  }
+  // Cache empty or expired — block until fresh
+  await refreshScreenshotCache();
+  return screenshotCache.buffer;
+}
+
+// ── Gemini analysis cache ─────────────────────────────────────────────────────
+// Refreshed in the background every 2 minutes.
+const ANALYSIS_TTL_MS = 120_000;
+let analysisCache = { text: null, takenAt: 0, refreshing: false };
+
+async function refreshAnalysisCache() {
+  if (analysisCache.refreshing) return;
+  analysisCache.refreshing = true;
+  try {
+    const messages = await fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT });
+    const text = await analyzeAlertMessages(messages);
+    analysisCache.text = text;
+    analysisCache.takenAt = Date.now();
+    console.log('Analysis cache refreshed');
+  } catch (err) {
+    console.error('Analysis refresh failed:', err);
+  } finally {
+    analysisCache.refreshing = false;
+  }
+}
+
+async function getCachedAnalysis() {
+  const age = Date.now() - analysisCache.takenAt;
+  if (analysisCache.text && age < ANALYSIS_TTL_MS) {
+    if (age > ANALYSIS_TTL_MS / 2) refreshAnalysisCache().catch(console.error);
+    return analysisCache.text;
+  }
+  await refreshAnalysisCache();
+  return analysisCache.text;
+}
+
 if (token) {
   const bot = new TelegramBot(token, { polling: true });
+
+  // Pre-warm: launch the browser and populate both caches before the first message arrives
+  getOrLaunchBrowser()
+    .then(() => Promise.all([refreshScreenshotCache(), refreshAnalysisCache()]))
+    .catch(console.error);
 
   bot.on('message', async (msg) => {
     const text = msg.text?.toLowerCase() ?? '';
@@ -245,12 +321,10 @@ if (token) {
     if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
       bot.sendChatAction(chatId, 'typing').catch(() => {});
       try {
-        const messages = await fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT });
-        const analysis = await analyzeAlertMessages(messages);
-        await bot.sendMessage(chatId, analysis);
+        const analysis = await getCachedAnalysis();
+        await bot.sendMessage(chatId, analysis ?? 'Не вдалося отримати аналіз.');
       } catch (error) {
-        console.error('Failed to analyse alert messages:', error);
-        // Gemini failed — fall back to sending the raw channel messages
+        console.error('Failed to send analysis:', error);
         try {
           await handleChannelMessageRequest({ botInstance: bot, chatId, limit: CHANNEL_MESSAGE_LIMIT });
         } catch (fallbackError) {
@@ -263,37 +337,17 @@ if (token) {
 
     if (!text.includes('тривога')) return;
 
-    // Acknowledge immediately so the user sees a response right away
     bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
-
-    let page;
-
     try {
-      const browser = await getOrLaunchBrowser();
-
-      page = await browser.newPage();
-      await applyViewport(page);
-
-      await page.goto('https://alerts.in.ua/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-
-      // Wait for the map canvas to appear instead of a fixed sleep
-      await waitForAnySelector(page, ALERT_CANVAS_SELECTORS, { timeout: 8000 });
-
-      const buffer = await captureCroppedScreenshot(page);
-      await bot.sendPhoto(chatId, buffer);
+      const buffer = await getCachedScreenshot();
+      if (buffer) {
+        await bot.sendPhoto(chatId, buffer);
+      } else {
+        await bot.sendMessage(chatId, 'Не вдалося отримати мапу тривог.');
+      }
     } catch (error) {
       console.error('Failed to send alert image:', error);
       await bot.sendMessage(chatId, 'Не вдалося отримати мапу тривог.');
-    } finally {
-      if (page) {
-        try {
-          await page.close();
-        } catch {}
-      }
-      // Browser stays alive for the next request — no browser.close() here
     }
   });
 }
