@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    image: alerts-bot
+    container_name: alerts-bot
+    # Keep the bot up across crashes and host reboots.
+    restart: unless-stopped
+    environment:
+      # Provide these in a local .env file (see .env.example) or the host shell.
+      # `:?` makes `docker compose up` fail fast with a clear message if the
+      # token is missing, instead of starting a container that crash-loops.
+      - BOT_TOKEN=${BOT_TOKEN:?BOT_TOKEN is required — set it in .env or your shell}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      # Persist the GeoJSON cache so boundaries aren't re-downloaded on restart.
+      - geo-cache:/app/neptun/geo
+
+volumes:
+  geo-cache:

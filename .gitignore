@@ -1,3 +1,6 @@
 node_modules/
 neptun/geo/
 
+# Local secrets — never commit. Use .env.example as the template.
+.env
+

@@ -25,6 +25,30 @@ The bot requires a `BOT_TOKEN` environment variable (set it via Replit Secrets).
 npm test
 ```
 
+## Docker
+
+The project ships with a `Dockerfile`, `.dockerignore`, and `docker-compose.yml`. The image is based on `node:20-slim` and installs **system Chromium** (plus Cyrillic + emoji fonts) so Puppeteer works in the container — `neptun/browser.js` picks it up via `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`.
+
+Run with Docker Compose (reads `BOT_TOKEN` / `GEMINI_API_KEY` from a local `.env` — see `.env.example`):
+
+```
+cp .env.example .env   # then fill in BOT_TOKEN
+docker compose up -d --build
+docker compose logs -f
+```
+
+Or plain Docker:
+
+```
+docker build -t alerts-bot .
+docker run -d --name alerts-bot --restart unless-stopped -e BOT_TOKEN=xxxx alerts-bot
+```
+
+Notes:
+- The bot is a **polling worker** — it exposes no inbound port.
+- The GeoJSON cache is downloaded on first run; Compose persists it in a named volume (`geo-cache`) so it survives restarts.
+- Secrets are never baked into the image (`.env` is excluded via `.dockerignore`); pass them at runtime.
+
 ## Bot commands & triggers
 
 | Trigger | Response |

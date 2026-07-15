@@ -1,0 +1,1 @@
+- [Puppeteer Chromium on Replit & Docker](puppeteer-chromium-env.md) — npm-bundled & @sparticuz Chromium fail on NixOS/slim; use system chromium + emoji/Cyrillic fonts.
