@@ -34,7 +34,7 @@ COPY package.json package-lock.json ./
 # "Exit handler never called!" npm crash on memory/disk-constrained build hosts.
 # The BuildKit cache mount keeps ~/.npm across builds so retries are fast and
 # self-healing against a corrupted download cache.
-RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund -v
 
 # ── Application source ────────────────────────────────────────────────────────
 COPY . .
