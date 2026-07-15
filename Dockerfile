@@ -29,12 +29,12 @@ WORKDIR /app
 
 # ── Dependencies (own layer for cache reuse) ──────────────────────────────────
 COPY package.json package-lock.json ./
-# --no-audit / --no-fund cut npm's extra work: audit does a network round-trip and
-# builds a second dependency graph, a common trigger for the intermittent
-# "Exit handler never called!" npm crash on memory/disk-constrained build hosts.
-# The BuildKit cache mount keeps ~/.npm across builds so retries are fast and
-# self-healing against a corrupted download cache.
-RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund -v
+# Plain `npm ci` so node_modules is committed to THIS image layer. Keep it plain:
+# a BuildKit `--mount=type=cache` on the install caches downloads but its contents
+# are not committed to the layer, so it's easy to ship an image whose deps are
+# missing at runtime (ERR_MODULE_NOT_FOUND). --no-audit / --no-fund trim npm's
+# extra graph-building + network work and lower memory use on small build hosts.
+RUN npm ci --omit=dev --no-audit --no-fund
 
 # ── Application source ────────────────────────────────────────────────────────
 COPY . .

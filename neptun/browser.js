@@ -21,7 +21,7 @@ const BASE_ARGS = [
   '--disable-infobars',
   '--disable-web-security',
   '--disable-features=IsolateOrigins,site-per-process',
-  '--js-flags=--max-old-space-size=4096',
+  '--js-flags=--max-old-space-size=1024', // bounded to fit the container memory cap (see docker-compose deploy.resources)
 ];
 
 function findSystemChromium() {
