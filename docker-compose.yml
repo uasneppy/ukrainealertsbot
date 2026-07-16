@@ -1,0 +1,60 @@
+services:
+  bot:
+    build: .
+    image: alerts-bot
+    container_name: alerts-bot
+
+    # Keep the bot up across crashes and host reboots. Pair with a boot-enabled
+    # Docker daemon on the VPS: `sudo systemctl enable --now docker`.
+    restart: unless-stopped
+
+    # tini as PID 1 reaps the zombie processes Chromium spawns — essential for a
+    # long-running Puppeteer container so defunct processes don't accumulate.
+    init: true
+
+    # Give the bot time to stop Telegram polling + close Chromium cleanly on stop.
+    stop_grace_period: 20s
+
+    # VPS hardening: block privilege escalation inside the container.
+    security_opt:
+      - no-new-privileges:true
+
+    # Resource caps so a runaway render can never take down the whole VPS (SSH
+    # included). Sized for a 4GB+ box; lower `memory` for a smaller VPS — and if
+    # you drop it below ~1.5G, also lower Chromium's --max-old-space-size in
+    # neptun/browser.js so the renderer stays within the cap.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          memory: 256M
+
+    # Cap log growth — a long-running bot logs continuously; default json-file
+    # logging is unbounded and can fill the host disk over time.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    environment:
+      # Provide these in a local .env file (see .env.example) or the host shell.
+      # `:?` makes `docker compose up` fail fast with a clear message if the
+      # token is missing, instead of starting a container that crash-loops.
+      - BOT_TOKEN=${BOT_TOKEN:?BOT_TOKEN is required — set it in .env or your shell}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # Timezone for log timestamps (defaults to UTC). e.g. TZ=Europe/Kyiv
+      - TZ=${TZ:-UTC}
+
+    volumes:
+      # Persist the GeoJSON cache so boundaries aren't re-downloaded on restart.
+      - geo-cache:/app/neptun/geo
+      # Custom threat icons — drop image files into ./icons on the host and the
+      # next render picks them up live; no rebuild or restart needed
+      # (see icons/README.md for file naming).
+      - ./icons:/app/icons:ro
+
+volumes:
+  geo-cache:

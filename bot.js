@@ -5,12 +5,19 @@ import dotenv from 'dotenv';
 
 import { fetchLatestChannelMessages, formatChannelMessages } from './channelMessages.js';
 import { analyzeAlertMessages } from './geminiAnalysis.js';
+import { getOrLaunchBrowser } from './neptun/browser.js';
+import { renderNeptunMap } from './neptun/mapRenderer.js';
+import { fetchSnapshot } from './neptun/neptunApi.js';
+import { startStream, getState, hasSnapshot } from './neptun/neptunStream.js';
+import { getGeoData } from './neptun/fetchGeo.js';
 
 dotenv.config();
 
 const token = process.env.BOT_TOKEN;
 const isTestEnv = process.env.NODE_ENV === 'test';
 if (!token && !isTestEnv) throw new Error('BOT_TOKEN is required');
+
+// ── resolveLaunchOptions — kept here for backward-compat with existing tests ──
 
 const createFallbackLaunchOptions = () => ({
   headless: 'new',
@@ -38,44 +45,7 @@ export const resolveLaunchOptions = async () => {
   }
 };
 
-let cachedLaunchOptionsPromise;
-const getLaunchOptions = () => {
-  if (!cachedLaunchOptionsPromise) cachedLaunchOptionsPromise = resolveLaunchOptions();
-  return cachedLaunchOptionsPromise;
-};
-
-// Persistent browser — reused across requests to avoid cold-start on every message.
-// Reset to null on disconnect so the next request relaunches cleanly.
-let activeBrowser = null;
-
-async function getOrLaunchBrowser() {
-  if (activeBrowser) {
-    return activeBrowser;
-  }
-
-  const options = await getLaunchOptions();
-
-  activeBrowser = await puppeteer.launch({
-    ...options,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-infobars',
-      '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--js-flags=--max-old-space-size=4096',
-      ...(options.args || []),
-    ],
-  });
-
-  activeBrowser.on('disconnected', () => {
-    activeBrowser = null;
-  });
-
-  return activeBrowser;
-}
+// ── Viewport / screenshot utilities — exported for tests ─────────────────────
 
 export const TARGET_VIEWPORT = Object.freeze({ width: 1280, height: 800, deviceScaleFactor: 1 });
 export const DEFAULT_CROP_PADDING = 70;
@@ -235,48 +205,53 @@ export async function handleChannelMessageRequest({
   await botInstance.sendMessage(chatId, formatted, { disable_web_page_preview: true });
 }
 
-// ── Screenshot cache ──────────────────────────────────────────────────────────
-// The map is refreshed in the background every 30 s so user requests are
-// served from cache and respond in under a second.
-const SCREENSHOT_TTL_MS = 30_000;
-let screenshotCache = { buffer: null, takenAt: 0, refreshing: false };
+// ── NEPTUN map render — shared by /map and тривога ────────────────────────────
 
-async function refreshScreenshotCache() {
-  if (screenshotCache.refreshing) return;
-  screenshotCache.refreshing = true;
-  let page;
+/**
+ * Renders the NEPTUN map using live WebSocket state if available,
+ * falling back to a one-off REST fetch if the stream hasn't connected yet.
+ */
+async function getNeptunMapData() {
+  if (hasSnapshot()) {
+    return getState();
+  }
+  // Stream not ready yet — fall back to REST
+  return fetchSnapshot();
+}
+
+// Cache for the rendered NEPTUN map (60 s TTL).
+const NEPTUN_MAP_TTL_MS = 60_000;
+let neptunMapCache = { buffer: null, caption: null, takenAt: 0, refreshing: false };
+
+async function refreshNeptunMapCache() {
+  if (neptunMapCache.refreshing) return;
+  neptunMapCache.refreshing = true;
   try {
-    const browser = await getOrLaunchBrowser();
-    page = await browser.newPage();
-    await applyViewport(page);
-    await page.goto('https://alerts.in.ua/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await waitForAnySelector(page, ALERT_CANVAS_SELECTORS, { timeout: 8000 });
-    const buffer = await captureCroppedScreenshot(page, DEFAULT_CROP_PADDING, 'jpeg');
-    screenshotCache.buffer = buffer;
-    screenshotCache.takenAt = Date.now();
-    console.log('Screenshot cache refreshed');
+    const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
+    const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
+    neptunMapCache.buffer = buffer;
+    neptunMapCache.caption = caption;
+    neptunMapCache.takenAt = Date.now();
+    console.log('[neptun] Map cache refreshed');
   } catch (err) {
-    console.error('Screenshot refresh failed:', err);
+    console.error('[neptun] Map cache refresh failed:', err);
   } finally {
-    screenshotCache.refreshing = false;
-    if (page) { try { await page.close(); } catch {} }
+    neptunMapCache.refreshing = false;
   }
 }
 
-async function getCachedScreenshot() {
-  const age = Date.now() - screenshotCache.takenAt;
-  if (screenshotCache.buffer && age < SCREENSHOT_TTL_MS) {
-    // Serve from cache; kick off a background refresh when half-stale
-    if (age > SCREENSHOT_TTL_MS / 2) refreshScreenshotCache().catch(console.error);
-    return screenshotCache.buffer;
+async function getCachedNeptunMap() {
+  const age = Date.now() - neptunMapCache.takenAt;
+  if (neptunMapCache.buffer && age < NEPTUN_MAP_TTL_MS) {
+    if (age > NEPTUN_MAP_TTL_MS / 2) refreshNeptunMapCache().catch(console.error);
+    return neptunMapCache;
   }
-  // Cache empty or expired — block until fresh
-  await refreshScreenshotCache();
-  return screenshotCache.buffer;
+  await refreshNeptunMapCache();
+  return neptunMapCache;
 }
 
 // ── Gemini analysis cache ─────────────────────────────────────────────────────
-// Refreshed in the background every 2 minutes.
+
 const ANALYSIS_TTL_MS = 120_000;
 let analysisCache = { text: null, takenAt: 0, refreshing: false };
 
@@ -306,18 +281,32 @@ async function getCachedAnalysis() {
   return analysisCache.text;
 }
 
+// ── Bot ───────────────────────────────────────────────────────────────────────
+
 if (token) {
   const bot = new TelegramBot(token, { polling: true });
 
-  // Pre-warm: launch the browser and populate both caches before the first message arrives
-  getOrLaunchBrowser()
-    .then(() => Promise.all([refreshScreenshotCache(), refreshAnalysisCache()]))
-    .catch(console.error);
+  // Pre-warm on startup: browser, geo cache, NEPTUN stream, map cache, analysis cache
+  (async () => {
+    try {
+      await getOrLaunchBrowser();
+      startStream();
+      await Promise.all([
+        getGeoData(),
+        refreshAnalysisCache(),
+      ]);
+      // First map render (can take a moment — background)
+      refreshNeptunMapCache().catch(console.error);
+    } catch (err) {
+      console.error('[startup] Pre-warm error:', err);
+    }
+  })();
 
   bot.on('message', async (msg) => {
     const text = msg.text?.toLowerCase() ?? '';
     const chatId = msg.chat.id;
 
+    // ── "чому тривога" — channel messages + Gemini analysis ──
     if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
       bot.sendChatAction(chatId, 'typing').catch(() => {});
       try {
@@ -335,19 +324,35 @@ if (token) {
       return;
     }
 
-    if (!text.includes('тривога')) return;
+    // ── "тривога" — NEPTUN live map ──
+    if (text.includes('тривога')) {
+      bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
+      try {
+        const { buffer, caption } = await getCachedNeptunMap();
+        if (buffer) {
+          await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
+        } else {
+          await bot.sendMessage(chatId, 'Не вдалося отримати мапу загроз.');
+        }
+      } catch (error) {
+        console.error('Failed to send NEPTUN map (тривога):', error);
+        await bot.sendMessage(chatId, 'Не вдалося отримати мапу загроз.');
+      }
+      return;
+    }
+  });
 
+  // ── /map command — on-demand REST fetch ──────────────────────────────────────
+  bot.onText(/^\/map/, async (msg) => {
+    const chatId = msg.chat.id;
     bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
     try {
-      const buffer = await getCachedScreenshot();
-      if (buffer) {
-        await bot.sendPhoto(chatId, buffer);
-      } else {
-        await bot.sendMessage(chatId, 'Не вдалося отримати мапу тривог.');
-      }
+      const [{ threats, alerts }, geo] = await Promise.all([fetchSnapshot(), getGeoData()]);
+      const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
+      await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
     } catch (error) {
-      console.error('Failed to send alert image:', error);
-      await bot.sendMessage(chatId, 'Не вдалося отримати мапу тривог.');
+      console.error('Failed to send NEPTUN map (/map):', error);
+      await bot.sendMessage(chatId, 'Не вдалося побудувати мапу загроз. Спробуй пізніше.');
     }
   });
 }
