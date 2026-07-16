@@ -25,6 +25,13 @@ The bot requires a `BOT_TOKEN` environment variable (set it via Replit Secrets).
 npm test
 ```
 
+Render the map without Telegram (writes a PNG + prints the caption):
+
+```
+node scripts/render-preview.js mock   # synthetic scenario (all threat types, raion+oblast alerts)
+node scripts/render-preview.js live   # current NEPTUN data
+```
+
 ## Docker
 
 The project ships with a `Dockerfile`, `.dockerignore`, and `docker-compose.yml`. The image is based on `node:22-slim` (LTS — matches the engine requirements of `puppeteer@25` and `@sparticuz/chromium`) and installs **system Chromium** (plus Cyrillic + emoji fonts) so Puppeteer works in the container — `neptun/browser.js` picks it up via `PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium`.
@@ -79,6 +86,7 @@ docker run -d --name alerts-bot --restart unless-stopped \
 Notes:
 - The bot is a **polling worker** — it exposes no inbound port.
 - The GeoJSON cache is downloaded on first run; Compose persists it in a named volume (`geo-cache`) so it survives restarts.
+- **Custom threat icons:** `./icons` is bind-mounted read-only into the container — drop `uav.png` (etc.) into the folder on the host and the next render picks it up, no rebuild or restart needed (naming: `icons/README.md`).
 - Secrets are never baked into the image (`.env` is excluded via `.dockerignore`); pass them at runtime.
 - **Portable lockfile** — `package-lock.json` resolves every package from public npm (`registry.npmjs.org`), so `npm ci` works on any host. Heads-up: running `npm install` **inside Replit** re-pins the `resolved` URLs to Replit's internal `package-firewall.replit.local` proxy, which a VPS can't reach — rewrite them back before deploying: `sed -i 's|http://package-firewall.replit.local/npm/|https://registry.npmjs.org/|g' package-lock.json`.
 
@@ -112,7 +120,9 @@ Notes:
 - **`fetchGeo.js`** — Downloads `ukraine.geojson`, `oblasts.geojson`, `raions.geojson` from neptun.in.ua once and caches them in `neptun/geo/` (excluded from git). In-process cache avoids repeated disk reads.
 - **`neptunApi.js`** — REST helpers: `fetchThreats()`, `fetchAlerts()`, `fetchSnapshot()`. Used by `/map` and as a fallback when the stream hasn't connected yet.
 - **`neptunStream.js`** — WebSocket client for `wss://neptun.in.ua/api/v1/stream`. Handles `snapshot / upsert / remove / alerts / heartbeat` messages. Reconnects with exponential backoff (1 s → 30 s cap). Exports `startStream()` and `getState()`.
-- **`mapRenderer.js`** — Renders the threat map as a PNG using Puppeteer + Leaflet (CDN). Oblast/raion boundaries are drawn from cached GeoJSON; alerted regions are highlighted red; threats are colored circles by type. Exports `renderNeptunMap({ threats, alerts, geo })`.
+- **`mapRenderer.js`** — Renders the threat map as a PNG using Puppeteer + **vendored Leaflet** (inlined from `node_modules`, no CDN at render time). NEPTUN alert entries are **objects** (`{ key, name, oblast, since }`); keys are normalised (`normalizeAlertKey`) and matched against GeoJSON `properties.key`. Fully-alerted **oblasts fill strong red**, individually-alerted **raions fill pale red** (raion alerts inside an already-red oblast are suppressed). Major cities are labelled; fractional zoom (`zoomSnap: 0`) fits Ukraine tightly at 1280×800. Exports `renderNeptunMap({ threats, alerts, geo })`.
+- **`threatIcons.js`** — Loads custom marker icons from the repo-root `icons/` folder (`<type>.<png|jpg|jpeg|webp|gif|svg>` → data URL). The folder is re-read on **every render**, so icons can be swapped live without a restart; files >1 MB are skipped. See `icons/README.md`.
+- **`defaultIcons.js`** — Built-in SVG badge markers per threat type, used when no user icon exists. Inline SVG is font-independent — headless Chromium's emoji coverage varies by host (tofu boxes □ otherwise), so emoji are only used in Telegram captions, never on the map.
 - **`browser.js`** — Shared Puppeteer browser singleton. Resolution order: env override → system `chromium` (NixOS/Replit) → `@sparticuz/chromium` (Lambda) → Puppeteer auto-detect.
 
 ### Caching

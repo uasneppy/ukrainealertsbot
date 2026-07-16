@@ -16,4 +16,6 @@ Neither Puppeteer's own downloaded Chrome nor `@sparticuz/chromium` (a Lambda-op
 
 **How to apply:** the resolver order that works is env override (`CHROME_EXECUTABLE_PATH`/`PUPPETEER_EXECUTABLE_PATH`) → `which chromium` → `@sparticuz/chromium` (Lambda only) → Puppeteer auto. Always launch with `--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage` (needed for containers / non-root; `/dev/shm` is tiny in Docker).
 
-**Fonts matter for rendered images:** the map draws Cyrillic text and color emoji *inside the PNG* (Leaflet HTML → screenshot). A slim image has no such fonts, so install `fonts-liberation fonts-dejavu-core fonts-noto-color-emoji` or the map shows tofu boxes. Replit's default env already has them.
+**Fonts matter for rendered images:** the map draws Cyrillic text *inside the PNG* (Leaflet HTML → screenshot). A slim image has no such fonts, so install `fonts-liberation fonts-dejavu-core fonts-noto-color-emoji`. Cyrillic renders fine in Replit's workspace chromium too — but **color emoji do NOT**: the workspace NixOS chromium shows tofu boxes for most emoji (only glyphs with text-font fallbacks like ✈ survive), even though the Docker image has the emoji font.
+
+**Rule: never rely on emoji for content drawn into headless-rendered images.** Use inline SVG data-URL markers instead (font-independent everywhere); keep emoji for Telegram message text only — Telegram clients render those themselves.

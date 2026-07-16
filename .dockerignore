@@ -13,8 +13,9 @@ npm-debug.log*
 # GeoJSON cache — downloaded at runtime (see neptun/fetchGeo.js)
 neptun/geo
 
-# Tests — not needed in the production image
+# Tests & dev-only scripts — not needed in the production image
 __tests__
+scripts
 
 # Replit-specific tooling / config
 .replit

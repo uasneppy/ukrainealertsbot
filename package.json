@@ -11,6 +11,7 @@
     "@google/generative-ai": "^0.24.1",
     "@sparticuz/chromium": "^149.0.0",
     "dotenv": "^17.4.2",
+    "leaflet": "^1.9.4",
     "node-telegram-bot-api": "^1.2.0",
     "puppeteer": "^25.3.0",
     "ws": "^8.21.1"
