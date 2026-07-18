@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import TelegramBot from 'node-telegram-bot-api';
 import puppeteer from 'puppeteer';
 import chromium from '@sparticuz/chromium';
@@ -10,7 +12,7 @@ import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js
 import { getOrLaunchBrowser } from './neptun/browser.js';
 import { renderNeptunMap } from './neptun/mapRenderer.js';
 import { fetchSnapshot } from './neptun/neptunApi.js';
-import { startStream, getState, hasSnapshot } from './neptun/neptunStream.js';
+import { startStream, getState, hasSnapshot, streamAgeMs } from './neptun/neptunStream.js';
 import { getGeoData } from './neptun/fetchGeo.js';
 
 dotenv.config();
@@ -209,88 +211,117 @@ export async function handleChannelMessageRequest({
 
 // ── NEPTUN map render — shared by /map and тривога ────────────────────────────
 
+// How fresh the WebSocket state must be to be trusted. Beyond this age the
+// stream is treated as stale (half-open socket, reconnect in progress) and the
+// data comes from a one-off REST fetch, so replies always reflect the live map.
+const STREAM_FRESH_MS = 60_000;
+
 /**
- * Renders the NEPTUN map using live WebSocket state if available,
- * falling back to a one-off REST fetch if the stream hasn't connected yet.
+ * Returns the current NEPTUN state, always favouring live data:
+ * fresh WebSocket state → REST fetch → last known stream state (last resort).
  */
 async function getNeptunMapData() {
-  if (hasSnapshot()) {
+  if (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS) {
     return getState();
   }
-  // Stream not ready yet — fall back to REST
-  return fetchSnapshot();
-}
-
-// Cache for the rendered NEPTUN map (60 s TTL).
-const NEPTUN_MAP_TTL_MS = 60_000;
-let neptunMapCache = { buffer: null, caption: null, takenAt: 0, refreshing: false };
-
-async function refreshNeptunMapCache() {
-  if (neptunMapCache.refreshing) return;
-  neptunMapCache.refreshing = true;
   try {
-    const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
-    const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
-    neptunMapCache.buffer = buffer;
-    neptunMapCache.caption = caption;
-    neptunMapCache.takenAt = Date.now();
-    console.log('[neptun] Map cache refreshed');
+    return await fetchSnapshot();
   } catch (err) {
-    console.error('[neptun] Map cache refresh failed:', err);
-  } finally {
-    neptunMapCache.refreshing = false;
+    if (hasSnapshot()) {
+      console.warn('[neptun] REST fetch failed, using last stream state:', err?.message ?? err);
+      return getState();
+    }
+    throw err;
   }
 }
 
-async function getCachedNeptunMap() {
-  const age = Date.now() - neptunMapCache.takenAt;
-  if (neptunMapCache.buffer && age < NEPTUN_MAP_TTL_MS) {
-    if (age > NEPTUN_MAP_TTL_MS / 2) refreshNeptunMapCache().catch(console.error);
-    return neptunMapCache;
-  }
-  await refreshNeptunMapCache();
-  return neptunMapCache;
+const jsonCompare = (a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b));
+
+/**
+ * Stable fingerprint of the data that ends up on a rendered map. Two calls
+ * with the same threats + alerts produce the same hash, so a cached image may
+ * be reused ONLY while the underlying data is truly unchanged.
+ */
+export function dataFingerprint({ threats = [], alerts = {} } = {}) {
+  const stable = {
+    t: [...threats].sort((a, b) => String(a?.id).localeCompare(String(b?.id))),
+    a: {
+      raions: [...(alerts.raions ?? [])].sort(jsonCompare),
+      oblasts: [...(alerts.oblasts ?? [])].sort(jsonCompare),
+    },
+  };
+  return createHash('sha1').update(JSON.stringify(stable)).digest('hex');
 }
 
-// ── Gemini analysis cache ─────────────────────────────────────────────────────
+// ── Live map rendering ────────────────────────────────────────────────────────
+// The map is ALWAYS rendered from the current data. A rendered frame is reused
+// only while the fingerprint of the live data still matches (nothing changed),
+// and even then no longer than MAP_REUSE_MS — spam protection that can never
+// serve an outdated picture.
+const MAP_REUSE_MS = 15_000;
+
+let neptunMapCache = { buffer: null, caption: null, fp: null, takenAt: 0 };
+let neptunMapRenderInFlight = null;
+
+async function getLiveNeptunMap() {
+  const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
+  const fp = dataFingerprint({ threats, alerts });
+  const cached = neptunMapCache;
+  if (cached.buffer && cached.fp === fp && Date.now() - cached.takenAt < MAP_REUSE_MS) {
+    return cached;
+  }
+  if (neptunMapRenderInFlight) return neptunMapRenderInFlight; // coalesce concurrent asks
+  neptunMapRenderInFlight = (async () => {
+    try {
+      const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
+      neptunMapCache = { buffer, caption, fp, takenAt: Date.now() };
+      return neptunMapCache;
+    } finally {
+      neptunMapRenderInFlight = null;
+    }
+  })();
+  return neptunMapRenderInFlight;
+}
+
+// ── Gemini analysis — reused only while the channel feed is unchanged ────────
+// The channel feed is fetched fresh on every request; the Gemini answer is
+// reused only when the fetched messages are identical to the analysed ones.
 
 const ANALYSIS_TTL_MS = 120_000;
-let analysisCache = { text: null, takenAt: 0, refreshing: false };
+let analysisCache = { text: null, fp: null, takenAt: 0 };
+let analysisInFlight = null;
 
-async function refreshAnalysisCache() {
-  if (analysisCache.refreshing) return;
-  analysisCache.refreshing = true;
-  try {
-    const messages = await fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT });
-    const text = await analyzeAlertMessages(messages);
-    analysisCache.text = text;
-    analysisCache.takenAt = Date.now();
-    console.log('Analysis cache refreshed');
-  } catch (err) {
-    console.error('Analysis refresh failed:', err);
-  } finally {
-    analysisCache.refreshing = false;
+async function getLiveAnalysis() {
+  const messages = await fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT });
+  const fp = createHash('sha1').update(JSON.stringify(messages)).digest('hex');
+  const cached = analysisCache;
+  if (cached.text && cached.fp === fp && Date.now() - cached.takenAt < ANALYSIS_TTL_MS) {
+    return cached.text;
   }
-}
-
-async function getCachedAnalysis() {
-  const age = Date.now() - analysisCache.takenAt;
-  if (analysisCache.text && age < ANALYSIS_TTL_MS) {
-    if (age > ANALYSIS_TTL_MS / 2) refreshAnalysisCache().catch(console.error);
-    return analysisCache.text;
-  }
-  await refreshAnalysisCache();
-  return analysisCache.text;
+  if (analysisInFlight) return analysisInFlight;
+  analysisInFlight = (async () => {
+    try {
+      const text = await analyzeAlertMessages(messages);
+      analysisCache = { text, fp, takenAt: Date.now() };
+      return text;
+    } finally {
+      analysisInFlight = null;
+    }
+  })();
+  return analysisInFlight;
 }
 
 // ── Region-scoped queries ─────────────────────────────────────────────────────
 // "тривога в києві" → zoomed map of the region; "чому тривога в києві" →
 // Gemini analysis scoped to the region and the user's exact question.
 
-const REGION_MAP_TTL_MS = 60_000;
+// Region replies follow the same rule as the country map: data is fetched
+// fresh every time, cached renders/answers are reused only while the data
+// fingerprint is unchanged.
+const REGION_MAP_REUSE_MS = 15_000;
 const REGION_WHY_TTL_MS = 90_000;
-const regionMapCache = new Map(); // cacheKey → { buffer, caption, takenAt }
-const regionWhyCache = new Map(); // cacheKey → { text, takenAt }
+const regionMapCache = new Map(); // cacheKey → { buffer, caption, fp, takenAt }
+const regionWhyCache = new Map(); // cacheKey → { text, fp, takenAt }
 
 function pruneCache(map, maxEntries = 40) {
   while (map.size > maxEntries) map.delete(map.keys().next().value);
@@ -298,30 +329,35 @@ function pruneCache(map, maxEntries = 40) {
 
 async function sendRegionMap(botInstance, chatId, region) {
   botInstance.sendChatAction(chatId, 'upload_photo').catch(() => {});
+  const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
+  const fp = dataFingerprint({ threats, alerts });
   const cached = regionMapCache.get(region.cacheKey);
-  if (cached && Date.now() - cached.takenAt < REGION_MAP_TTL_MS) {
+  if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_MAP_REUSE_MS) {
     await botInstance.sendPhoto(chatId, cached.buffer, { caption: cached.caption ?? undefined });
     return;
   }
-  const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
   const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
-  regionMapCache.set(region.cacheKey, { buffer, caption, takenAt: Date.now() });
+  regionMapCache.set(region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
   pruneCache(regionMapCache);
   await botInstance.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
 }
 
 async function sendRegionWhy(botInstance, chatId, region, userQuery) {
   botInstance.sendChatAction(chatId, 'typing').catch(() => {});
-  const cached = regionWhyCache.get(region.cacheKey);
-  if (cached && Date.now() - cached.takenAt < REGION_WHY_TTL_MS) {
-    await botInstance.sendMessage(chatId, cached.text);
-    return;
-  }
   const [{ threats, alerts }, geo, messages] = await Promise.all([
     getNeptunMapData(),
     getGeoData(),
     fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT }).catch(() => []),
   ]);
+  const fp =
+    dataFingerprint({ threats, alerts }) +
+    ':' +
+    createHash('sha1').update(JSON.stringify(messages)).digest('hex');
+  const cached = regionWhyCache.get(region.cacheKey);
+  if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_WHY_TTL_MS) {
+    await botInstance.sendMessage(chatId, cached.text);
+    return;
+  }
   const status = buildRegionStatus({ region, threats, alerts, geo });
   const report = formatRegionReport(status);
   let text;
@@ -338,7 +374,7 @@ async function sendRegionWhy(botInstance, chatId, region, userQuery) {
     console.error('Region Gemini analysis failed, sending NEPTUN report:', error?.message ?? error);
     text = `${report}\n\n⚠️ AI-аналіз тимчасово недоступний — вище наведено живі дані NEPTUN.`;
   }
-  regionWhyCache.set(region.cacheKey, { text, takenAt: Date.now() });
+  regionWhyCache.set(region.cacheKey, { text, fp, takenAt: Date.now() });
   pruneCache(regionWhyCache);
   await botInstance.sendMessage(chatId, text);
 }
@@ -348,17 +384,20 @@ async function sendRegionWhy(botInstance, chatId, region, userQuery) {
 if (token) {
   const bot = new TelegramBot(token, { polling: true });
 
-  // Pre-warm on startup: browser, geo cache, NEPTUN stream, map cache, analysis cache
+  // Pre-warm on startup: browser, geo cache, NEPTUN stream, first render.
+  // Warm-ups only prime the browser/Gemini path — every user request still
+  // fetches live data and re-renders whenever that data has changed.
   (async () => {
     try {
       await getOrLaunchBrowser();
       startStream();
-      await Promise.all([
-        getGeoData(),
-        refreshAnalysisCache(),
-      ]);
-      // First map render (can take a moment — background)
-      refreshNeptunMapCache().catch(console.error);
+      await getGeoData();
+      getLiveNeptunMap().catch((err) =>
+        console.error('[startup] Map warm-up failed:', err?.message ?? err)
+      );
+      getLiveAnalysis().catch((err) =>
+        console.error('[startup] Analysis warm-up failed:', err?.message ?? err)
+      );
     } catch (err) {
       console.error('[startup] Pre-warm error:', err);
     }
@@ -391,7 +430,7 @@ if (token) {
     if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
       bot.sendChatAction(chatId, 'typing').catch(() => {});
       try {
-        const analysis = await getCachedAnalysis();
+        const analysis = await getLiveAnalysis();
         await bot.sendMessage(chatId, analysis ?? 'Не вдалося отримати аналіз.');
       } catch (error) {
         console.error('Failed to send analysis:', error);
@@ -420,7 +459,7 @@ if (token) {
     if (text.includes('тривога')) {
       bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
       try {
-        const { buffer, caption } = await getCachedNeptunMap();
+        const { buffer, caption } = await getLiveNeptunMap();
         if (buffer) {
           await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
         } else {

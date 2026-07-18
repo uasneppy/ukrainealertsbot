@@ -103,10 +103,10 @@ Notes:
 |---|---|
 | `/map` | Renders a NEPTUN threat map on demand (REST fetch) |
 | `/map <регіон>` | Zoomed region map, e.g. `/map київ`, `/map харківська область` |
-| `тривога` (any case) | Renders the live NEPTUN threat map (WebSocket state, cached 60 s) |
-| `тривога в <місто/область>` | Zoomed region map: oblast fit, or a tight city close-up with flight trails + course arrows; per-threat labels, region-scoped caption (cached 60 s per region) |
-| `чому тривога` | Fetches latest @kpszsu channel posts + Gemini AI analysis |
-| `чому тривога в <місто/область>` | Gemini analysis scoped to the region and the user's exact question: live NEPTUN facts (alert level, threats in/near) + channel posts. Without `GEMINI_API_KEY` falls back to the raw NEPTUN report (cached 90 s per region) |
+| `тривога` (any case) | Renders the NEPTUN threat map from **live data on every request**; the previous frame is reused only while the data fingerprint is unchanged (≤15 s) |
+| `тривога в <місто/область>` | Zoomed region map: oblast fit, or a tight city close-up with flight trails + course arrows; per-threat labels, region-scoped caption. Rendered from live data; frame reused only while data is unchanged (≤15 s per region) |
+| `чому тривога` | Fetches latest @kpszsu channel posts + Gemini AI analysis (answer reused ≤2 min only while the feed is unchanged) |
+| `чому тривога в <місто/область>` | Gemini analysis scoped to the region and the user's exact question: live NEPTUN facts (alert level, threats in/near) + channel posts. Without `GEMINI_API_KEY` falls back to the raw NEPTUN report (answer reused ≤90 s only while NEPTUN data + feed are unchanged) |
 
 Region queries understand grammatical cases ("в Києві", "у львівській області", "на харківщині", "в ар крим"); unrecognized regions fall through to the generic handlers.
 
@@ -125,8 +125,8 @@ Region queries understand grammatical cases ("в Києві", "у львівсь
 ### NEPTUN integration (`neptun/`)
 
 - **`fetchGeo.js`** — Downloads `ukraine.geojson`, `oblasts.geojson`, `raions.geojson` from neptun.in.ua once and caches them in `neptun/geo/` (excluded from git). In-process cache avoids repeated disk reads.
-- **`neptunApi.js`** — REST helpers: `fetchThreats()`, `fetchAlerts()`, `fetchSnapshot()`. Used by `/map` and as a fallback when the stream hasn't connected yet.
-- **`neptunStream.js`** — WebSocket client for `wss://neptun.in.ua/api/v1/stream`. Handles `snapshot / upsert / remove / alerts / heartbeat` messages. Reconnects with exponential backoff (1 s → 30 s cap). Exports `startStream()` and `getState()`.
+- **`neptunApi.js`** — REST helpers: `fetchThreats()`, `fetchAlerts()`, `fetchSnapshot()`. Used by `/map` and as a fallback whenever the stream state is missing **or stale**.
+- **`neptunStream.js`** — WebSocket client for `wss://neptun.in.ua/api/v1/stream`. Handles `snapshot / upsert / remove / alerts / heartbeat` messages. Reconnects with exponential backoff (1 s → 30 s cap). A **watchdog** pings every 15 s and force-reconnects after 90 s without traffic — half-open sockets (NAT timeout, server restart without FIN) never emit `close` and would otherwise freeze the in-memory state silently. Exports `startStream()`, `getState()`, `hasSnapshot()`, `streamAgeMs()`.
 - **`mapRenderer.js`** — Renders the threat map as a PNG using Puppeteer + **vendored Leaflet** (inlined from `node_modules`, no CDN at render time). NEPTUN alert entries are **objects** (`{ key, name, oblast, since }`); keys are normalised (`normalizeAlertKey`) and matched against GeoJSON `properties.key`. Fully-alerted **oblasts fill strong red**, individually-alerted **raions fill pale red** (raion alerts inside an already-red oblast are suppressed). Major cities are labelled; fractional zoom (`zoomSnap: 0`) fits Ukraine tightly at 1280×800. Exports `renderNeptunMap({ threats, alerts, geo, focus })` — an optional `focus` region (from `resolveRegion`) renders a **zoomed view**: oblasts fit the polygon (dashed border emphasis); cities use a **tight adaptive frame** (≈18–28 km half-extent, expanded just enough to include in-city threats, capped at `radiusKm`) so the exact locality a threat flies over is visible. Focused threats also draw their **flight trail** (dashed line + dots from the feed's `trail: [{lat,lon,t}]`) and a **course arrow** from `heading`. Every marker gets a text label (`Тип · нас. пункт`); legend/caption cover only in-region + nearby threats. All feed-derived strings are HTML-escaped before injection into the page.
 - **`threatMeta.js`** — Shared threat metadata (`THREAT_COLORS/EMOJI/NAMES_UA/LABELS_UA`) and alert-key helpers (`normalizeAlertKey`, `extractAlertKeys`, `computeAlertKeySets`). Dependency-free; `mapRenderer.js` re-exports everything for back-compat.
 - **`regionResolver.js`** — `parseRegionQuery()` detects "тривога в <регіон>" / "чому в <регіон> тривога" queries; `resolveRegion()` maps Ukrainian region/city names in any grammatical case to descriptors via longest-prefix matching (24 oblasts incl. "-щина" forms and Крим, ~30 cities with coordinates). City-vs-oblast stem ties ("донецьку" → місто, "донецькій" → область) break on "область" / adjective endings. NB: JS regex `\b` never matches at Cyrillic word edges — lookarounds are used instead.
@@ -135,12 +135,14 @@ Region queries understand grammatical cases ("в Києві", "у львівсь
 - **`defaultIcons.js`** — Built-in SVG badge markers per threat type, used when no user icon exists. Inline SVG is font-independent — headless Chromium's emoji coverage varies by host (tofu boxes □ otherwise), so emoji are only used in Telegram captions, never on the map.
 - **`browser.js`** — Shared Puppeteer browser singleton. Resolution order: env override → system `chromium` (NixOS/Replit) → `@sparticuz/chromium` (Lambda) → Puppeteer auto-detect.
 
-### Caching
+### Liveness & caching
 
-- **NEPTUN map** — rendered PNG cached for 60 s; background refresh at 30 s. Served instantly on "тривога".
-- **Gemini analysis** — cached for 2 min with background refresh at 1 min.
-- **Region maps** — per-region PNG cache, 60 s TTL, pruned at 40 entries.
-- **Region "why" analysis** — per-region cache, 90 s TTL (any phrasing about the same region within the TTL gets the cached answer), pruned at 40 entries.
+Every reply is built from live data — caches can never serve a frame or answer whose underlying data has changed:
+
+- On each request the bot takes fresh stream state (trusted only while `streamAgeMs()` < 60 s, otherwise a REST fetch; REST failure falls back to the last stream state) and computes a SHA-1 **fingerprint** of threats + alerts (`dataFingerprint` in `bot.js`).
+- **Country & region maps** — re-rendered the moment the fingerprint differs from the cached one; an identical fingerprint reuses the frame for at most 15 s (anti-spam only). Concurrent asks coalesce into a single render. Region cache pruned at 40 entries.
+- **Gemini analysis ("чому тривога")** — the channel feed is fetched fresh on every request; the Gemini answer is reused only while the feed is byte-identical, capped at 2 min.
+- **Region "why"** — reused ≤90 s only while both the NEPTUN fingerprint and the channel feed are unchanged; pruned at 40 entries.
 
 ### Startup pre-warm
 
