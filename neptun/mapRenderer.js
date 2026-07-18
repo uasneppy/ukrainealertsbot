@@ -216,8 +216,11 @@ function _renderOnPage(payload) {
       style: () => ({ color: '#eaf2fb', weight: 2.6, opacity: 0.95, fill: false, dashArray: '6 4' }),
     }).addTo(map);
   } else if (focusView && focusView.kind === 'city') {
-    const dLat = focusView.radiusKm / 110.574;
-    const dLon = focusView.radiusKm / (111.32 * Math.cos((focusView.lat * Math.PI) / 180));
+    // frameKm is the adaptive half-extent (tight around the city + its
+    // threats); radiusKm is only the classification zone, not the frame.
+    const halfKm = focusView.frameKm || focusView.radiusKm;
+    const dLat = halfKm / 110.574;
+    const dLon = halfKm / (111.32 * Math.cos((focusView.lat * Math.PI) / 180));
     map.fitBounds(
       [[focusView.lat - dLat, focusView.lon - dLon], [focusView.lat + dLat, focusView.lon + dLon]],
       { padding: [8, 8] }
@@ -259,6 +262,37 @@ function _renderOnPage(payload) {
     }).addTo(map);
   }
 
+  // 6c. Focused mode: flight trails + course vectors. NEPTUN positions are
+  //     precise, so the past track and an arrow of the current heading make
+  //     it obvious over which locality a threat flies and where it's going.
+  const kmToDeg = (lat, km) => [km / 110.574, km / (111.32 * Math.cos((lat * Math.PI) / 180))];
+  threats.forEach((t) => {
+    if (typeof t.lat !== 'number' || typeof t.lon !== 'number') return;
+    const color = (typeMeta[t.type] && typeMeta[t.type].color) || '#9aa7b5';
+    if (Array.isArray(t.trail) && t.trail.length) {
+      L.polyline(t.trail.concat([[t.lat, t.lon]]), {
+        color, weight: 2, opacity: 0.55, dashArray: '2 5', interactive: false,
+      }).addTo(map);
+      t.trail.forEach((p) => {
+        L.circleMarker(p, {
+          radius: 2, color, weight: 1, fillColor: color, fillOpacity: 0.8, opacity: 0.8, interactive: false,
+        }).addTo(map);
+      });
+    }
+    if (typeof t.heading === 'number') {
+      const rad = (t.heading * Math.PI) / 180;
+      const [vLat, vLon] = kmToDeg(t.lat, 7);
+      const tip = [t.lat + vLat * Math.cos(rad), t.lon + vLon * Math.sin(rad)];
+      const barb = (offsetDeg) => {
+        const r = ((t.heading + 180 + offsetDeg) * Math.PI) / 180;
+        const [bLat, bLon] = kmToDeg(tip[0], 2.4);
+        return [tip[0] + bLat * Math.cos(r), tip[1] + bLon * Math.sin(r)];
+      };
+      L.polyline([[t.lat, t.lon], tip], { color, weight: 2.5, opacity: 0.9, interactive: false }).addTo(map);
+      L.polyline([barb(-32), tip, barb(32)], { color, weight: 2.5, opacity: 0.9, interactive: false }).addTo(map);
+    }
+  });
+
   // 7. Threat markers — user icon or built-in badge; unknown types get the
   //    "unknown" badge (emoji divIcon only as a last-resort fallback).
   //    In focused (region) mode each marker also carries a text label.
@@ -290,14 +324,18 @@ function _renderOnPage(payload) {
   });
   /* eslint-enable no-undef */
 
-  // Legend
+  // Legend — display names for unknown threat types come from the feed's
+  // `title`, i.e. untrusted input: escape anything interpolated into HTML.
+  const esc = (s) => String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const legendItems = Object.keys(typeMeta).map((type) => {
     const meta = typeMeta[type];
     const legendUrl = iconDataUrls[type] || iconDataUrls.unknown;
     const visual = legendUrl
       ? '<img src="' + legendUrl + '" style="width:16px;height:16px;object-fit:contain">'
       : '<span style="font-size:14px;line-height:1">' + meta.emoji + '</span>';
-    return '<div class="legend-item">' + visual + '<span>' + meta.name + ' ×' + meta.count + '</span></div>';
+    return '<div class="legend-item">' + visual + '<span>' + esc(meta.name) + ' ×' + meta.count + '</span></div>';
   }).join('');
 
   const alertRows =
@@ -395,13 +433,31 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
       if (focus) {
         const label = `${THREAT_NAMES_UA[type] ?? (t?.title || '')}${t?.locality ? ' · ' + t.locality : ''}`.trim();
         if (label) entry.label = escapeHtml(label);
+        if (Number.isFinite(t?.heading)) entry.heading = t.heading;
+        const trail = (Array.isArray(t?.trail) ? t.trail : [])
+          .map((p) => (Array.isArray(p) ? [p?.[0], p?.[1]] : [p?.lat, p?.lon]))
+          .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]))
+          .slice(-12);
+        if (trail.length) entry.trail = trail;
       }
       return entry;
     });
 
-    const focusView = !focus ? null : focus.kind === 'oblast'
-      ? { kind: 'oblast', key: focus.geoKey, name: focus.name }
-      : { kind: 'city', name: focus.name, lat: focus.lat, lon: focus.lon, radiusKm: focus.radiusKm ?? 60 };
+    let focusView = null;
+    if (focus && focus.kind === 'oblast') {
+      focusView = { kind: 'oblast', key: focus.geoKey, name: focus.name };
+    } else if (focus) {
+      // Tight adaptive frame for cities: hug the city and the threats actually
+      // near it, so the exact locality a threat flies over is clearly visible.
+      const inCity = focusStatus ? focusStatus.threatsIn : [];
+      let frameKm = inCity.length ? 18 : 28;
+      for (const t of inCity) frameKm = Math.max(frameKm, t.distanceKm * 1.25 + 6);
+      frameKm = Math.min(frameKm, focus.radiusKm ?? 60);
+      focusView = {
+        kind: 'city', name: focus.name, lat: focus.lat, lon: focus.lon,
+        radiusKm: focus.radiusKm ?? 60, frameKm,
+      };
+    }
 
     await page.evaluate(_renderOnPage, {
       ukraine, oblasts, raions,

@@ -1,6 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { parseRegionQuery, resolveRegion } from '../neptun/regionResolver.js';
+import { parseRegionQuery, resolveRegion, __testables } from '../neptun/regionResolver.js';
 
 describe('parseRegionQuery', () => {
   it('parses "Тривога в Києві"', () => {
@@ -124,6 +126,53 @@ describe('resolveRegion — city vs oblast disambiguation', () => {
     expect(resolveRegion('франківській')).toMatchObject({ kind: 'oblast', geoKey: 'івано-франківська' });
   });
 });
+
+describe('resolveRegion — false-positive guard', () => {
+  it('does not hijack everyday words sharing a prefix with a region', () => {
+    expect(resolveRegion('кримінальному провадженні')).toBeNull();
+    expect(resolveRegion('криміналі')).toBeNull();
+    expect(resolveRegion('автономному режимі')).toBeNull();
+    expect(resolveRegion('арках')).toBeNull();
+    expect(resolveRegion('києвлян')).toBeNull();
+  });
+
+  it('unrelated "тривога в ..." parses but resolves to null (falls through)', () => {
+    const q = parseRegionQuery('тривога в кримінальному провадженні');
+    expect(q).not.toBeNull();
+    expect(resolveRegion(q.regionText)).toBeNull();
+  });
+
+  it('still accepts genuine declensions after the guard', () => {
+    expect(resolveRegion('криму')).toMatchObject({ kind: 'oblast', geoKey: 'автономна республіка крим' });
+    expect(resolveRegion('запоріжжі')).toMatchObject({ kind: 'city', name: 'Запоріжжя' });
+    expect(resolveRegion('донецького')).toMatchObject({ kind: 'city', name: 'Донецьк' });
+    expect(resolveRegion('автономній республіці крим')).toMatchObject({ kind: 'oblast', geoKey: 'автономна республіка крим' });
+  });
+});
+
+const oblastsGeoPath = path.resolve('neptun/geo/oblasts.geojson');
+const raionsGeoPath = path.resolve('neptun/geo/raions.geojson');
+
+describe.skipIf(!fs.existsSync(oblastsGeoPath) || !fs.existsSync(raionsGeoPath))(
+  'resolver keys match the cached NEPTUN GeoJSON',
+  () => {
+    it('every oblast geoKey, city oblastGeoKey and raionKey exists in the geo data', () => {
+      const oblastKeys = new Set(
+        JSON.parse(fs.readFileSync(oblastsGeoPath, 'utf8')).features.map((f) => String(f.properties.key).toLowerCase())
+      );
+      const raionKeys = new Set(
+        JSON.parse(fs.readFileSync(raionsGeoPath, 'utf8')).features.map((f) => String(f.properties.key).toLowerCase())
+      );
+      for (const def of __testables.OBLAST_DEFS) {
+        expect(oblastKeys.has(def.geoKey), `oblast geoKey missing: ${def.geoKey}`).toBe(true);
+      }
+      for (const c of __testables.CITY_DEFS) {
+        expect(oblastKeys.has(c.oblastGeoKey), `city oblastGeoKey missing: ${c.oblastGeoKey}`).toBe(true);
+        if (c.raionKey) expect(raionKeys.has(c.raionKey), `city raionKey missing: ${c.raionKey}`).toBe(true);
+      }
+    });
+  }
+);
 
 describe('resolveRegion — misc', () => {
   it('"україні" resolves to the whole country', () => {

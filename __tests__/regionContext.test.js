@@ -163,6 +163,23 @@ describe('buildRegionStatus — city', () => {
     });
     expect(viaOblast.alertScope).toBe('oblast');
   });
+
+  it('full-oblast + raion alerts together → "oblast" wins (subsumes the raion)', () => {
+    const kharkiv = {
+      kind: 'city', name: 'Харків', lat: 49.9935, lon: 36.2304,
+      radiusKm: 55, alertKey: null, oblastGeoKey: 'харківська', raionKey: 'харківський',
+    };
+    const both = buildRegionStatus({
+      region: kharkiv, threats: [],
+      alerts: {
+        oblasts: [{ key: 'харківська', name: 'Харківська область', since: '2026-07-18T17:20:00Z' }],
+        raions: [{ key: 'харківський', name: 'Харківський район', oblast: 'Харківська область', since: '2026-07-18T17:25:00Z' }],
+      },
+      geo,
+    });
+    expect(both.alertScope).toBe('oblast');
+    expect(both.alertSince).toBe('2026-07-18T17:20:00Z');
+  });
 });
 
 describe('report and caption builders', () => {

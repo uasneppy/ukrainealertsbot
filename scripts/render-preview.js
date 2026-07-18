@@ -30,9 +30,24 @@ const MOCK = {
     { id: 'm7', type: 'recon',    title: 'Розвідник',      lat: 51.30, lon: 33.40, locality: 'Конотоп',  region: 'Сумська область' },
     { id: 'm8', type: 'mig31k',   title: 'МіГ-31К',        lat: 46.10, lon: 33.60 },
     { id: 'm9', type: 'shahed-x', title: 'Новий тип',      lat: 47.60, lon: 34.30 },
-    // Kyiv-area scenario for region previews:
-    { id: 'k1', type: 'uav',      title: 'БпЛА',           lat: 50.5111, lon: 30.7909, locality: 'Бровари', region: 'Київська область', heading: 262 },
-    { id: 'k2', type: 'missile',  title: 'Крилата ракета', lat: 49.80,   lon: 30.12,   locality: 'Біла Церква', region: 'Київська область', heading: 20 },
+    // Kyiv-area scenario for region previews (with trails, as in the live feed):
+    {
+      id: 'k1', type: 'uav', title: 'БпЛА', lat: 50.5111, lon: 30.7909,
+      locality: 'Бровари', region: 'Київська область', heading: 262,
+      trail: [
+        { lat: 50.545, lon: 31.05, t: '2026-07-18T18:20:00Z' },
+        { lat: 50.532, lon: 30.95, t: '2026-07-18T18:24:00Z' },
+        { lat: 50.520, lon: 30.87, t: '2026-07-18T18:28:00Z' },
+      ],
+    },
+    {
+      id: 'k2', type: 'missile', title: 'Крилата ракета', lat: 49.80, lon: 30.12,
+      locality: 'Біла Церква', region: 'Київська область', heading: 20,
+      trail: [
+        { lat: 49.62, lon: 30.02, t: '2026-07-18T18:26:00Z' },
+        { lat: 49.71, lon: 30.07, t: '2026-07-18T18:28:00Z' },
+      ],
+    },
   ],
   alerts: {
     oblasts: [
