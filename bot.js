@@ -4,7 +4,9 @@ import chromium from '@sparticuz/chromium';
 import dotenv from 'dotenv';
 
 import { fetchLatestChannelMessages, formatChannelMessages } from './channelMessages.js';
-import { analyzeAlertMessages } from './geminiAnalysis.js';
+import { analyzeAlertMessages, analyzeRegionQuery } from './geminiAnalysis.js';
+import { parseRegionQuery, resolveRegion } from './neptun/regionResolver.js';
+import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js';
 import { getOrLaunchBrowser } from './neptun/browser.js';
 import { renderNeptunMap } from './neptun/mapRenderer.js';
 import { fetchSnapshot } from './neptun/neptunApi.js';
@@ -281,6 +283,66 @@ async function getCachedAnalysis() {
   return analysisCache.text;
 }
 
+// ── Region-scoped queries ─────────────────────────────────────────────────────
+// "тривога в києві" → zoomed map of the region; "чому тривога в києві" →
+// Gemini analysis scoped to the region and the user's exact question.
+
+const REGION_MAP_TTL_MS = 60_000;
+const REGION_WHY_TTL_MS = 90_000;
+const regionMapCache = new Map(); // cacheKey → { buffer, caption, takenAt }
+const regionWhyCache = new Map(); // cacheKey → { text, takenAt }
+
+function pruneCache(map, maxEntries = 40) {
+  while (map.size > maxEntries) map.delete(map.keys().next().value);
+}
+
+async function sendRegionMap(botInstance, chatId, region) {
+  botInstance.sendChatAction(chatId, 'upload_photo').catch(() => {});
+  const cached = regionMapCache.get(region.cacheKey);
+  if (cached && Date.now() - cached.takenAt < REGION_MAP_TTL_MS) {
+    await botInstance.sendPhoto(chatId, cached.buffer, { caption: cached.caption ?? undefined });
+    return;
+  }
+  const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
+  const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
+  regionMapCache.set(region.cacheKey, { buffer, caption, takenAt: Date.now() });
+  pruneCache(regionMapCache);
+  await botInstance.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
+}
+
+async function sendRegionWhy(botInstance, chatId, region, userQuery) {
+  botInstance.sendChatAction(chatId, 'typing').catch(() => {});
+  const cached = regionWhyCache.get(region.cacheKey);
+  if (cached && Date.now() - cached.takenAt < REGION_WHY_TTL_MS) {
+    await botInstance.sendMessage(chatId, cached.text);
+    return;
+  }
+  const [{ threats, alerts }, geo, messages] = await Promise.all([
+    getNeptunMapData(),
+    getGeoData(),
+    fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT }).catch(() => []),
+  ]);
+  const status = buildRegionStatus({ region, threats, alerts, geo });
+  const report = formatRegionReport(status);
+  let text;
+  try {
+    text = await analyzeRegionQuery({
+      userQuery,
+      regionName: region.name,
+      regionReport: report,
+      channelMessages: messages,
+    });
+  } catch (error) {
+    // No GEMINI_API_KEY or Gemini error — the live NEPTUN report still answers
+    // the question factually, so send it instead of failing.
+    console.error('Region Gemini analysis failed, sending NEPTUN report:', error?.message ?? error);
+    text = `${report}\n\n⚠️ AI-аналіз тимчасово недоступний — вище наведено живі дані NEPTUN.`;
+  }
+  regionWhyCache.set(region.cacheKey, { text, takenAt: Date.now() });
+  pruneCache(regionWhyCache);
+  await botInstance.sendMessage(chatId, text);
+}
+
 // ── Bot ───────────────────────────────────────────────────────────────────────
 
 if (token) {
@@ -306,6 +368,25 @@ if (token) {
     const text = msg.text?.toLowerCase() ?? '';
     const chatId = msg.chat.id;
 
+    // Commands (/map …) are handled by their own onText handlers — skipping
+    // them here prevents double replies for command texts containing triggers.
+    if (text.startsWith('/')) return;
+
+    // ── Region-scoped: "тривога в києві", "чому тривога в київській області" ──
+    const regionQuery = parseRegionQuery(text);
+    const regionMatch = regionQuery ? resolveRegion(regionQuery.regionText) : null;
+    const focusRegion = regionMatch && regionMatch.kind !== 'country' ? regionMatch : null;
+
+    if (focusRegion && regionQuery.why) {
+      try {
+        await sendRegionWhy(bot, chatId, focusRegion, msg.text ?? '');
+      } catch (error) {
+        console.error('Failed to send region analysis:', error);
+        await bot.sendMessage(chatId, 'Не вдалося отримати аналіз по регіону.');
+      }
+      return;
+    }
+
     // ── "чому тривога" — channel messages + Gemini analysis ──
     if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
       bot.sendChatAction(chatId, 'typing').catch(() => {});
@@ -320,6 +401,17 @@ if (token) {
           console.error('Fallback also failed:', fallbackError);
           await bot.sendMessage(chatId, 'Не вдалося отримати інформацію з каналу @kpszsu.');
         }
+      }
+      return;
+    }
+
+    // ── Region map: "тривога в <місті/області>" ──
+    if (focusRegion) {
+      try {
+        await sendRegionMap(bot, chatId, focusRegion);
+      } catch (error) {
+        console.error('Failed to send region map:', error);
+        await bot.sendMessage(chatId, 'Не вдалося побудувати мапу регіону.');
       }
       return;
     }
@@ -342,9 +434,22 @@ if (token) {
     }
   });
 
-  // ── /map command — on-demand REST fetch ──────────────────────────────────────
-  bot.onText(/^\/map/, async (msg) => {
+  // ── /map command — on-demand REST fetch; "/map київ" renders a region ───────
+  bot.onText(/^\/map(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
+    const regionArg = match?.[1]?.trim();
+    if (regionArg) {
+      const region = resolveRegion(regionArg);
+      if (region && region.kind !== 'country') {
+        try {
+          await sendRegionMap(bot, chatId, region);
+        } catch (error) {
+          console.error('Failed to send NEPTUN region map (/map):', error);
+          await bot.sendMessage(chatId, 'Не вдалося побудувати мапу регіону. Спробуй пізніше.');
+        }
+        return;
+      }
+    }
     bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
     try {
       const [{ threats, alerts }, geo] = await Promise.all([fetchSnapshot(), getGeoData()]);

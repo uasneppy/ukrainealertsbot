@@ -13,50 +13,28 @@ import { getOrLaunchBrowser } from './browser.js';
 import { getGeoData } from './fetchGeo.js';
 import { loadThreatIcons } from './threatIcons.js';
 import { getDefaultIconDataUrls } from './defaultIcons.js';
+import {
+  THREAT_COLORS,
+  THREAT_EMOJI,
+  THREAT_NAMES_UA,
+  computeAlertKeySets,
+} from './threatMeta.js';
+import { buildRegionStatus, buildFocusCaption } from './regionContext.js';
 
 const require = createRequire(import.meta.url);
 
-// ── Threat metadata ──────────────────────────────────────────────────────────
-// Types observed in the live NEPTUN feed: uav, fpv (+ the classic set below).
-// Unknown/new types fall back to `unknown` styling and use the feed's `title`.
+// ── Threat metadata & alert-key helpers moved to threatMeta.js ───────────────
+// Re-exported here for back-compat (tests and existing imports keep working).
 
-export const THREAT_COLORS = {
-  missile:   '#ff4444',
-  ballistic: '#cc0000',
-  uav:       '#ff8c00',
-  fpv:       '#ff4fa3',
-  recon:     '#ffd700',
-  kab:       '#bb00ff',
-  mig31k:    '#ff6600',
-  unknown:   '#9aa7b5',
-};
-
-export const THREAT_EMOJI = {
-  missile:   '🚀',
-  ballistic: '💥',
-  uav:       '✈️',
-  fpv:       '🛸',
-  recon:     '👁️',
-  kab:       '💣',
-  mig31k:    '🛩️',
-  unknown:   '❓',
-};
-
-export const THREAT_NAMES_UA = {
-  missile:   'Ракета',
-  ballistic: 'Балістика',
-  uav:       'БпЛА',
-  fpv:       'FPV-дрон',
-  recon:     'Розвідник',
-  kab:       'КАБ',
-  mig31k:    'МіГ-31К',
-  unknown:   'Невідомо',
-};
-
-/** Back-compat: emoji + name, used in captions. */
-export const THREAT_LABELS_UA = Object.fromEntries(
-  Object.keys(THREAT_NAMES_UA).map((t) => [t, `${THREAT_EMOJI[t]} ${THREAT_NAMES_UA[t]}`])
-);
+export {
+  THREAT_COLORS,
+  THREAT_EMOJI,
+  THREAT_NAMES_UA,
+  THREAT_LABELS_UA,
+  normalizeAlertKey,
+  extractAlertKeys,
+  computeAlertKeySets,
+} from './threatMeta.js';
 
 // ── Cities labelled on the map ────────────────────────────────────────────────
 
@@ -71,51 +49,6 @@ export const CITY_LABELS = [
   { name: 'Донецьк',   lat: 48.0159, lon: 37.8028 },
   { name: 'Маріуполь', lat: 47.0971, lon: 37.5434 },
 ];
-
-// ── Alert key normalisation ───────────────────────────────────────────────────
-// NEPTUN alert entries are objects ({ key, name, oblast, since }) — older code
-// treated them as strings, so Set.has() never matched and no region was ever
-// highlighted. GeoJSON features carry the same lowercase `properties.key`.
-
-export function normalizeAlertKey(value) {
-  // For objects, try key → name → oblast, skipping empty strings — some feed
-  // entries have `key: ""` but a usable `name`.
-  const candidates = value != null && typeof value === 'object' && !Array.isArray(value)
-    ? [value.key, value.name, value.oblast]
-    : [value];
-  for (const candidate of candidates) {
-    const normalized = String(candidate ?? '')
-      .normalize('NFC')
-      .toLowerCase()
-      .replace(/\s+(область|обл\.?|район|р-н)\s*$/u, '')
-      .trim();
-    if (normalized) return normalized;
-  }
-  return '';
-}
-
-/** Normalises a list of alert entries (objects or strings) into unique keys. */
-export function extractAlertKeys(entries) {
-  return [...new Set((entries ?? []).map(normalizeAlertKey).filter(Boolean))];
-}
-
-/**
- * Splits NEPTUN alerts into oblast/raion key lists for the renderer.
- * Raion alerts inside a fully-alerted oblast are dropped — the strong red
- * oblast fill already covers them (raion entries carry their parent oblast
- * name in `.oblast`). String entries have no parent info and are kept as-is.
- */
-export function computeAlertKeySets(alerts = {}) {
-  const oblastKeys = extractAlertKeys(alerts.oblasts);
-  const oblastKeySet = new Set(oblastKeys);
-  const raionKeys = extractAlertKeys((alerts.raions ?? []).filter((entry) => {
-    const parent = entry != null && typeof entry === 'object' && !Array.isArray(entry)
-      ? normalizeAlertKey(entry.oblast)
-      : '';
-    return !(parent && oblastKeySet.has(parent));
-  }));
-  return { oblastKeys, raionKeys };
-}
 
 // ── Leaflet assets (vendored, inlined once per process) ──────────────────────
 
@@ -166,6 +99,11 @@ function buildSkeletonHtml({ js, css }) {
     filter: drop-shadow(0 1px 3px rgba(0,0,0,0.9));
   }
   .threat-img { filter: drop-shadow(0 2px 5px rgba(0,0,0,0.85)); }
+  .threat-wrap { display: flex; flex-direction: column; align-items: center; }
+  .threat-label {
+    margin-top: 2px; font: 700 11px/1.15 sans-serif; color: #ffe9c9;
+    white-space: nowrap; text-shadow: 0 1px 2px #000, 0 0 6px #000;
+  }
 
   .legend {
     position: fixed; bottom: 18px; right: 18px;
@@ -207,7 +145,7 @@ function _renderOnPage(payload) {
   const {
     ukraine, oblasts, raions,
     threats, alertedOblastKeys, alertedRaionKeys,
-    typeMeta, iconDataUrls, cities, timestamp,
+    typeMeta, iconDataUrls, cities, timestamp, focusView,
   } = payload;
 
   // Mirrors normalizeAlertKey() on the Node side (keep in sync).
@@ -267,8 +205,29 @@ function _renderOnPage(payload) {
     style: () => ({ color: '#84b3e0', weight: 2.4, opacity: 1, fill: false }),
   }).addTo(map);
 
-  // Fit as close as the frame allows
-  map.fitBounds(L.geoJSON(ukraine).getBounds(), { padding: [12, 12] });
+  // Fit the frame: whole country, a single oblast, or a city with surroundings
+  let focusFeature = null;
+  if (focusView && focusView.kind === 'oblast') {
+    focusFeature = ((oblasts && oblasts.features) || []).find((f) => featKey(f) === focusView.key) || null;
+  }
+  if (focusFeature) {
+    map.fitBounds(L.geoJSON(focusFeature).getBounds(), { padding: [26, 26] });
+    L.geoJSON(focusFeature, {
+      style: () => ({ color: '#eaf2fb', weight: 2.6, opacity: 0.95, fill: false, dashArray: '6 4' }),
+    }).addTo(map);
+  } else if (focusView && focusView.kind === 'city') {
+    const dLat = focusView.radiusKm / 110.574;
+    const dLon = focusView.radiusKm / (111.32 * Math.cos((focusView.lat * Math.PI) / 180));
+    map.fitBounds(
+      [[focusView.lat - dLat, focusView.lon - dLon], [focusView.lat + dLat, focusView.lon + dLon]],
+      { padding: [8, 8] }
+    );
+    L.circleMarker([focusView.lat, focusView.lon], {
+      radius: 11, color: '#ffffff', weight: 2, opacity: 0.95, fill: false, dashArray: '2 3',
+    }).addTo(map);
+  } else {
+    map.fitBounds(L.geoJSON(ukraine).getBounds(), { padding: [12, 12] });
+  }
 
   // 6. City labels (below threat markers)
   cities.forEach((c) => {
@@ -285,19 +244,48 @@ function _renderOnPage(payload) {
     }).addTo(map);
   });
 
+  // 6b. Focused city label, if the city is not in the standard label list
+  if (focusView && focusView.kind === 'city' && !cities.some((c) => c.name === focusView.name)) {
+    L.marker([focusView.lat, focusView.lon], {
+      interactive: false,
+      keyboard: false,
+      zIndexOffset: -900,
+      icon: L.divIcon({
+        className: 'city-marker',
+        iconSize: [0, 0],
+        iconAnchor: [4, 4],
+        html: '<div class="city-dot"></div><div class="city-name">' + focusView.name + '</div>',
+      }),
+    }).addTo(map);
+  }
+
   // 7. Threat markers — user icon or built-in badge; unknown types get the
-  //    "unknown" badge (emoji divIcon only as a last-resort fallback)
+  //    "unknown" badge (emoji divIcon only as a last-resort fallback).
+  //    In focused (region) mode each marker also carries a text label.
   threats.forEach((t) => {
     if (typeof t.lat !== 'number' || typeof t.lon !== 'number') return;
     const iconUrl = iconDataUrls[t.type] || iconDataUrls.unknown;
-    const icon = iconUrl
-      ? L.icon({ iconUrl, iconSize: [38, 38], iconAnchor: [19, 19], className: 'threat-img' })
-      : L.divIcon({
-          className: '',
-          iconSize: [30, 30],
-          iconAnchor: [15, 15],
-          html: '<div class="threat-emoji">' + ((typeMeta[t.type] && typeMeta[t.type].emoji) || '❓') + '</div>',
-        });
+    let icon;
+    if (t.label) {
+      const visual = iconUrl
+        ? '<img src="' + iconUrl + '" style="width:38px;height:38px" class="threat-img">'
+        : '<div class="threat-emoji">' + ((typeMeta[t.type] && typeMeta[t.type].emoji) || '❓') + '</div>';
+      icon = L.divIcon({
+        className: '',
+        iconSize: [160, 60],
+        iconAnchor: [80, 19],
+        html: '<div class="threat-wrap">' + visual + '<div class="threat-label">' + t.label + '</div></div>',
+      });
+    } else if (iconUrl) {
+      icon = L.icon({ iconUrl, iconSize: [38, 38], iconAnchor: [19, 19], className: 'threat-img' });
+    } else {
+      icon = L.divIcon({
+        className: '',
+        iconSize: [30, 30],
+        iconAnchor: [15, 15],
+        html: '<div class="threat-emoji">' + ((typeMeta[t.type] && typeMeta[t.type].emoji) || '❓') + '</div>',
+      });
+    }
     L.marker([t.lat, t.lon], { interactive: false, keyboard: false, zIndexOffset: 1000, icon }).addTo(map);
   });
   /* eslint-enable no-undef */
@@ -323,7 +311,7 @@ function _renderOnPage(payload) {
     + legendItems + alertRows + '</div>';
 
   const titleHtml = '<div class="title-bar"><div class="title-dot"></div>'
-    + '<span>NEPTUN — Карта загроз</span>'
+    + '<span>' + (focusView && focusView.name ? 'NEPTUN — ' + focusView.name : 'NEPTUN — Карта загроз') + '</span>'
     + '<span style="color:#607a94;font-size:11px">' + timestamp + '</span></div>';
 
   document.body.insertAdjacentHTML('beforeend', legendHtml + titleHtml);
@@ -339,22 +327,33 @@ function _renderOnPage(payload) {
  * @param {object} opts.alerts   { raions: Array, oblasts: Array } — entries are
  *                               NEPTUN objects ({ key, name, oblast, … }) or strings
  * @param {object} [opts.geo]    Pre-loaded geo data (skips disk read when provided)
+ * @param {object} [opts.focus]  Region descriptor from resolveRegion() — renders a
+ *                               zoomed oblast/city view with per-threat labels
  * @returns {Promise<{ buffer: Buffer, caption: string }>}
  */
-export async function renderNeptunMap({ threats = [], alerts = {}, geo } = {}) {
+export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = null } = {}) {
   const geoData = geo ?? (await getGeoData());
   const { ukraine, oblasts, raions } = geoData;
 
   const { oblastKeys, raionKeys } = computeAlertKeySets(alerts);
 
+  // Focused (region-detail) mode: the legend and caption cover only threats in
+  // or near the region, while the map still draws every threat in the frame.
+  const focusStatus = focus
+    ? buildRegionStatus({ region: focus, threats, alerts, geo: geoData })
+    : null;
+  const metaSource = focusStatus
+    ? [...focusStatus.threatsIn, ...focusStatus.threatsNear]
+    : threats;
+
   // Per-type metadata for markers, legend and caption.
   const typeMeta = {};
-  for (const t of threats) {
+  for (const t of metaSource) {
     const type = String(t?.type ?? 'unknown').toLowerCase();
     if (!typeMeta[type]) {
       typeMeta[type] = {
         count: 0,
-        name: THREAT_NAMES_UA[type] ?? (t?.title || type),
+        name: THREAT_NAMES_UA[type] ?? (t?.title || t?.name || type),
         emoji: THREAT_EMOJI[type] ?? THREAT_EMOJI.unknown,
         color: THREAT_COLORS[type] ?? THREAT_COLORS.unknown,
       };
@@ -385,22 +384,40 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo } = {}) {
     await page.setViewport({ width: PAGE_W, height: PAGE_H, deviceScaleFactor: 1 });
     await page.setContent(buildSkeletonHtml(leaflet), { waitUntil: 'load', timeout: 20_000 });
 
+    // Slim the payload — trails etc. are not needed for markers. In focused
+    // mode every marker gets a text label (type + locality from the feed).
+    const escapeHtml = (s) => String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const slimThreats = threats.map((t) => {
+      const type = String(t?.type ?? 'unknown').toLowerCase();
+      const entry = { lat: t?.lat, lon: t?.lon, type };
+      if (focus) {
+        const label = `${THREAT_NAMES_UA[type] ?? (t?.title || '')}${t?.locality ? ' · ' + t.locality : ''}`.trim();
+        if (label) entry.label = escapeHtml(label);
+      }
+      return entry;
+    });
+
+    const focusView = !focus ? null : focus.kind === 'oblast'
+      ? { kind: 'oblast', key: focus.geoKey, name: focus.name }
+      : { kind: 'city', name: focus.name, lat: focus.lat, lon: focus.lon, radiusKm: focus.radiusKm ?? 60 };
+
     await page.evaluate(_renderOnPage, {
       ukraine, oblasts, raions,
-      // Slim the payload — trails etc. are not needed for markers.
-      threats: threats
-        .map((t) => ({ lat: t?.lat, lon: t?.lon, type: String(t?.type ?? 'unknown').toLowerCase() })),
+      threats: slimThreats,
       alertedOblastKeys: oblastKeys,
       alertedRaionKeys: raionKeys,
       typeMeta, iconDataUrls,
       cities: CITY_LABELS,
       timestamp,
+      focusView,
     });
 
     await page.waitForFunction(() => window.__mapReady === true, { timeout: 5_000 });
 
     const buffer = await page.screenshot({ type: 'png', fullPage: false });
-    const caption = buildCaption(typeMeta, alerts, now);
+    const caption = focusStatus ? buildFocusCaption(focusStatus, now) : buildCaption(typeMeta, alerts, now);
 
     return { buffer, caption };
   } finally {

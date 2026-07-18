@@ -28,8 +28,10 @@ npm test
 Render the map without Telegram (writes a PNG + prints the caption):
 
 ```
-node scripts/render-preview.js mock   # synthetic scenario (all threat types, raion+oblast alerts)
-node scripts/render-preview.js live   # current NEPTUN data
+node scripts/render-preview.js mock                          # synthetic scenario (all threat types, raion+oblast alerts)
+node scripts/render-preview.js live                          # current NEPTUN data
+node scripts/render-preview.js mock /tmp/kyiv.png "київ"     # zoomed region view (mock)
+node scripts/render-preview.js live /tmp/kh.png "харківщина" # zoomed region view (live)
 ```
 
 ## Docker
@@ -100,8 +102,13 @@ Notes:
 | Trigger | Response |
 |---|---|
 | `/map` | Renders a NEPTUN threat map on demand (REST fetch) |
+| `/map <регіон>` | Zoomed region map, e.g. `/map київ`, `/map харківська область` |
 | `тривога` (any case) | Renders the live NEPTUN threat map (WebSocket state, cached 60 s) |
+| `тривога в <місто/область>` | Zoomed region map: oblast fit or city radius, per-threat labels, region-scoped caption (cached 60 s per region) |
 | `чому тривога` | Fetches latest @kpszsu channel posts + Gemini AI analysis |
+| `чому тривога в <місто/область>` | Gemini analysis scoped to the region and the user's exact question: live NEPTUN facts (alert level, threats in/near) + channel posts. Without `GEMINI_API_KEY` falls back to the raw NEPTUN report (cached 90 s per region) |
+
+Region queries understand grammatical cases ("в Києві", "у львівській області", "на харківщині", "в ар крим"); unrecognized regions fall through to the generic handlers.
 
 ## Environment variables
 
@@ -120,7 +127,10 @@ Notes:
 - **`fetchGeo.js`** — Downloads `ukraine.geojson`, `oblasts.geojson`, `raions.geojson` from neptun.in.ua once and caches them in `neptun/geo/` (excluded from git). In-process cache avoids repeated disk reads.
 - **`neptunApi.js`** — REST helpers: `fetchThreats()`, `fetchAlerts()`, `fetchSnapshot()`. Used by `/map` and as a fallback when the stream hasn't connected yet.
 - **`neptunStream.js`** — WebSocket client for `wss://neptun.in.ua/api/v1/stream`. Handles `snapshot / upsert / remove / alerts / heartbeat` messages. Reconnects with exponential backoff (1 s → 30 s cap). Exports `startStream()` and `getState()`.
-- **`mapRenderer.js`** — Renders the threat map as a PNG using Puppeteer + **vendored Leaflet** (inlined from `node_modules`, no CDN at render time). NEPTUN alert entries are **objects** (`{ key, name, oblast, since }`); keys are normalised (`normalizeAlertKey`) and matched against GeoJSON `properties.key`. Fully-alerted **oblasts fill strong red**, individually-alerted **raions fill pale red** (raion alerts inside an already-red oblast are suppressed). Major cities are labelled; fractional zoom (`zoomSnap: 0`) fits Ukraine tightly at 1280×800. Exports `renderNeptunMap({ threats, alerts, geo })`.
+- **`mapRenderer.js`** — Renders the threat map as a PNG using Puppeteer + **vendored Leaflet** (inlined from `node_modules`, no CDN at render time). NEPTUN alert entries are **objects** (`{ key, name, oblast, since }`); keys are normalised (`normalizeAlertKey`) and matched against GeoJSON `properties.key`. Fully-alerted **oblasts fill strong red**, individually-alerted **raions fill pale red** (raion alerts inside an already-red oblast are suppressed). Major cities are labelled; fractional zoom (`zoomSnap: 0`) fits Ukraine tightly at 1280×800. Exports `renderNeptunMap({ threats, alerts, geo, focus })` — an optional `focus` region (from `resolveRegion`) renders a **zoomed view**: bounds fit the oblast polygon (dashed border emphasis) or the city radius (dashed focus ring), every threat marker gets a text label (`Тип · нас. пункт`), and the legend/caption cover only in-region + nearby threats.
+- **`threatMeta.js`** — Shared threat metadata (`THREAT_COLORS/EMOJI/NAMES_UA/LABELS_UA`) and alert-key helpers (`normalizeAlertKey`, `extractAlertKeys`, `computeAlertKeySets`). Dependency-free; `mapRenderer.js` re-exports everything for back-compat.
+- **`regionResolver.js`** — `parseRegionQuery()` detects "тривога в <регіон>" / "чому в <регіон> тривога" queries; `resolveRegion()` maps Ukrainian region/city names in any grammatical case to descriptors via longest-prefix matching (24 oblasts incl. "-щина" forms and Крим, ~30 cities with coordinates). City-vs-oblast stem ties ("донецьку" → місто, "донецькій" → область) break on "область" / adjective endings. NB: JS regex `\b` never matches at Cyrillic word edges — lookarounds are used instead.
+- **`regionContext.js`** — `buildRegionStatus()` computes the region's alert level (oblast / raions / city / raion) and splits threats into **in-region** (point-in-polygon for oblasts, ≤radius for cities) vs **nearby** (≤90 km from the oblast border via dense ring vertices, ≤140 km for cities) with distances, compass directions and headings. `formatRegionReport()` builds the plain-text facts block (Gemini prompt + no-API-key fallback); `buildFocusCaption()` the Telegram caption (≤1024 chars).
 - **`threatIcons.js`** — Loads custom marker icons from the repo-root `icons/` folder (`<type>.<png|jpg|jpeg|webp|gif|svg>` → data URL). The folder is re-read on **every render**, so icons can be swapped live without a restart; files >1 MB are skipped. See `icons/README.md`.
 - **`defaultIcons.js`** — Built-in SVG badge markers per threat type, used when no user icon exists. Inline SVG is font-independent — headless Chromium's emoji coverage varies by host (tofu boxes □ otherwise), so emoji are only used in Telegram captions, never on the map.
 - **`browser.js`** — Shared Puppeteer browser singleton. Resolution order: env override → system `chromium` (NixOS/Replit) → `@sparticuz/chromium` (Lambda) → Puppeteer auto-detect.
@@ -129,6 +139,8 @@ Notes:
 
 - **NEPTUN map** — rendered PNG cached for 60 s; background refresh at 30 s. Served instantly on "тривога".
 - **Gemini analysis** — cached for 2 min with background refresh at 1 min.
+- **Region maps** — per-region PNG cache, 60 s TTL, pruned at 40 entries.
+- **Region "why" analysis** — per-region cache, 90 s TTL (any phrasing about the same region within the TTL gets the cached answer), pruned at 40 entries.
 
 ### Startup pre-warm
 
