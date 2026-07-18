@@ -1,0 +1,26 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M170 170L342 342" stroke="white" stroke-width="20" stroke-linecap="round"/>
+<path d="M170 342L342 170" stroke="white" stroke-width="20" stroke-linecap="round"/>
+<path d="M276 140H236C224.954 140 216 148.954 216 160C216 171.046 224.954 180 236 180H276C287.046 180 296 171.046 296 160C296 148.954 287.046 140 276 140Z" fill="white"/>
+<path d="M216 190H296V352C296 372 280 384 268 384H244C232 384 216 372 216 352V190Z" fill="white"/>
+<path d="M120 190L190 120Z" fill="black"/>
+<path d="M120 190L190 120" stroke="white" stroke-width="12" stroke-linecap="round"/>
+<path d="M190 190L120 120Z" fill="black"/>
+<path d="M190 190L120 120" stroke="white" stroke-width="12" stroke-linecap="round"/>
+<path d="M392 190L322 120Z" fill="black"/>
+<path d="M392 190L322 120" stroke="white" stroke-width="12" stroke-linecap="round"/>
+<path d="M322 190L392 120Z" fill="black"/>
+<path d="M322 190L392 120" stroke="white" stroke-width="12" stroke-linecap="round"/>
+<path d="M120 392L190 322Z" fill="black"/>
+<path d="M120 392L190 322" stroke="white" stroke-width="12" stroke-linecap="round"/>
+<path d="M190 392L120 322Z" fill="black"/>
+<path d="M190 392L120 322" stroke="white" stroke-width="12" stroke-linecap="round"/>
+<path d="M392 392L322 322Z" fill="black"/>
+<path d="M392 392L322 322" stroke="white" stroke-width="12" stroke-linecap="round"/>
+<path d="M322 392L392 322Z" fill="black"/>
+<path d="M322 392L392 322" stroke="white" stroke-width="12" stroke-linecap="round"/>
+<path d="M155 171C163.837 171 171 163.837 171 155C171 146.163 163.837 139 155 139C146.163 139 139 146.163 139 155C139 163.837 146.163 171 155 171Z" fill="white"/>
+<path d="M357 171C365.837 171 373 163.837 373 155C373 146.163 365.837 139 357 139C348.163 139 341 146.163 341 155C341 163.837 348.163 171 357 171Z" fill="white"/>
+<path d="M155 373C163.837 373 171 365.837 171 357C171 348.163 163.837 341 155 341C146.163 341 139 348.163 139 357C139 365.837 146.163 373 155 373Z" fill="white"/>
+<path d="M357 373C365.837 373 373 365.837 373 357C373 348.163 365.837 341 357 341C348.163 341 341 348.163 341 357C341 365.837 348.163 373 357 373Z" fill="white"/>
+</svg>
