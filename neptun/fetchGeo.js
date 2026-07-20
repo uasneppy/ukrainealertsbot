@@ -8,13 +8,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { fetchWithTimeout } from '../fetchWithTimeout.js';
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const GEO_DIR = path.join(__dirname, 'geo');
-
-/** Generous deadline — the raion boundaries are a multi-MB download. */
-const TIMEOUT_MS = 30_000;
 
 const GEO_URLS = {
   ukraine: 'https://neptun.in.ua/ukraine.geojson',
@@ -25,7 +20,7 @@ const GEO_URLS = {
 async function downloadAndCache(name, url) {
   const destPath = path.join(GEO_DIR, `${name}.geojson`);
   console.log(`[fetchGeo] Downloading ${name}.geojson …`);
-  const response = await fetchWithTimeout(url, { timeoutMs: TIMEOUT_MS });
+  const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`);
   }

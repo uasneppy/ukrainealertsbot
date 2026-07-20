@@ -3,19 +3,14 @@
  * No API key required.
  */
 
-import { fetchWithTimeout } from '../fetchWithTimeout.js';
-
 const BASE = 'https://neptun.in.ua/api/v1';
-
-/** Short deadline — these calls block a user waiting on a map reply. */
-const TIMEOUT_MS = 8_000;
 
 /**
  * Fetches the current threat list.
  * @returns {Promise<Array>} Array of threat objects.
  */
 export async function fetchThreats() {
-  const response = await fetchWithTimeout(`${BASE}/threats`, { timeoutMs: TIMEOUT_MS });
+  const response = await fetch(`${BASE}/threats`);
   if (!response.ok) {
     throw new Error(`NEPTUN threats API error: HTTP ${response.status}`);
   }
@@ -29,7 +24,7 @@ export async function fetchThreats() {
  * @returns {Promise<{ raions: string[], oblasts: string[] }>}
  */
 export async function fetchAlerts() {
-  const response = await fetchWithTimeout(`${BASE}/alerts`, { timeoutMs: TIMEOUT_MS });
+  const response = await fetch(`${BASE}/alerts`);
   if (!response.ok) {
     throw new Error(`NEPTUN alerts API error: HTTP ${response.status}`);
   }
