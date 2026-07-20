@@ -23,6 +23,9 @@ import {
   MAX_PER_CHAT,
 } from './neptun/subscriptions.js';
 import { createAlertWatcher, formatAlertNotification } from './neptun/alertWatcher.js';
+import { createSender } from './telegramSender.js';
+import { createSnapshotSource } from './neptun/liveState.js';
+import { createFrameCache } from './neptun/frameCache.js';
 
 dotenv.config();
 
@@ -223,25 +226,20 @@ export async function handleChannelMessageRequest({
 // How fresh the WebSocket state must be to be trusted. Beyond this age the
 // stream is treated as stale (half-open socket, reconnect in progress) and the
 // data comes from a one-off REST fetch, so replies always reflect the live map.
-const STREAM_FRESH_MS = 60_000;
+// Every user-facing answer reads the API. The stream's freshness clock is reset
+// by heartbeat and pong, so a live-but-drifted socket looks healthy while its
+// state is wrong, and nothing reconciled it — which is how a map ends up
+// disagreeing with the API while missiles are inbound. Stream state is now the
+// fallback for an unreachable API, not the default. See neptun/liveState.js.
+const liveSnapshot = createSnapshotSource({
+  fetchSnapshot,
+  getState,
+  hasSnapshot,
+  streamAgeMs,
+});
 
-/**
- * Returns the current NEPTUN state, always favouring live data:
- * fresh WebSocket state → REST fetch → last known stream state (last resort).
- */
 async function getNeptunMapData() {
-  if (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS) {
-    return getState();
-  }
-  try {
-    return await fetchSnapshot();
-  } catch (err) {
-    if (hasSnapshot()) {
-      console.warn('[neptun] REST fetch failed, using last stream state:', err?.message ?? err);
-      return getState();
-    }
-    throw err;
-  }
+  return liveSnapshot.get();
 }
 
 const jsonCompare = (a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b));
@@ -269,27 +267,18 @@ export function dataFingerprint({ threats = [], alerts = {} } = {}) {
 // serve an outdated picture.
 const MAP_REUSE_MS = 15_000;
 
-let neptunMapCache = { buffer: null, caption: null, fp: null, takenAt: 0 };
-let neptunMapRenderInFlight = null;
+// The frame is keyed on a fingerprint of the data, so a picture is only ever
+// reused while nothing has moved. See neptun/frameCache.js for why coalescing
+// on "a render is running" (without checking the data) served stale maps.
+const mapFrames = createFrameCache({
+  render: ({ threats, alerts, geo }) => renderNeptunMap({ threats, alerts, geo }),
+  reuseMs: MAP_REUSE_MS,
+});
 
 async function getLiveNeptunMap() {
   const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
   const fp = dataFingerprint({ threats, alerts });
-  const cached = neptunMapCache;
-  if (cached.buffer && cached.fp === fp && Date.now() - cached.takenAt < MAP_REUSE_MS) {
-    return cached;
-  }
-  if (neptunMapRenderInFlight) return neptunMapRenderInFlight; // coalesce concurrent asks
-  neptunMapRenderInFlight = (async () => {
-    try {
-      const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
-      neptunMapCache = { buffer, caption, fp, takenAt: Date.now() };
-      return neptunMapCache;
-    } finally {
-      neptunMapRenderInFlight = null;
-    }
-  })();
-  return neptunMapRenderInFlight;
+  return mapFrames.get(fp, { threats, alerts, geo });
 }
 
 // ── Gemini analysis — reused only while the channel feed is unchanged ────────
@@ -457,20 +446,29 @@ if (token && !isTestEnv) {
   // ── Alert watcher ───────────────────────────────────────────────────────────
   // Only ever reasons about fresh stream state: returning null here is what
   // stops a dead socket from being read as "відбій" for every subscriber.
+  // Fan-out goes through a paced queue: one alert can mean a message to every
+  // subscribed chat at once, and a burst past Telegram's ~30/s ceiling comes
+  // back as 429s — dropping exactly the messages nobody knows to ask for again.
+  const notificationSender = createSender({
+    send: (chatId, text) => bot.sendMessage(chatId, text),
+    // A chat that blocked or deleted the bot would otherwise be retried on
+    // every alert forever.
+    onDeadChat: (chatId) => {
+      const { removed } = unsubscribe(chatId);
+      if (removed) console.log(`[alert-watcher] dropped ${removed} subscription(s) for ${chatId}`);
+    },
+  });
+
   const alertWatcher = createAlertWatcher({
-    getSnapshot: () =>
-      (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS ? getState() : null),
+    // Same authority as the maps: notifications and pictures must never
+    // disagree. null when nothing trustworthy is available, so the tick skips.
+    getSnapshot: () => liveSnapshot.getOrNull(),
     getGeo: getGeoData,
-    notify: async ({ region, chatIds, active, status }) => {
+    // Enqueue and return: the tick must not sit waiting on a fan-out that is
+    // paced over seconds, or ticks would overlap during a nationwide alert.
+    notify: ({ region, chatIds, active, status }) => {
       const text = formatAlertNotification({ region, active, status });
-      for (const chatId of chatIds) {
-        try {
-          await bot.sendMessage(chatId, text);
-        } catch (err) {
-          // Blocked bot / deleted chat — log and keep going for the others.
-          console.error(`[alert-watcher] send to ${chatId} failed:`, err?.message ?? err);
-        }
-      }
+      for (const chatId of chatIds) notificationSender.sendTo(chatId, text);
     },
   });
 
@@ -590,7 +588,8 @@ if (token && !isTestEnv) {
     }
     bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
     try {
-      const [{ threats, alerts }, geo] = await Promise.all([fetchSnapshot(), getGeoData()]);
+      // Same source as every other reply, so /map can't disagree with «тривога».
+      const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
       const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
       await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
     } catch (error) {
@@ -695,6 +694,9 @@ if (token && !isTestEnv) {
 
     alertWatcher.stop();
     stopStream();
+    // Deliver whatever is still queued — an alert notification abandoned
+    // mid-fan-out is one nobody will ever be told about.
+    await notificationSender.drain();
     // Let any queued subscription write land before the process goes away.
     await flushSubscriptions();
     await closeBrowser();

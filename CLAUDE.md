@@ -32,6 +32,8 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `bot.js` | Telegram handlers, caching, flood control, shutdown. Pure helpers are exported for tests; the live bot is wrapped in `if (token && !isTestEnv)` |
 | `neptun/neptunStream.js` | WebSocket client, freshness watchdog, reconnect |
 | `neptun/neptunApi.js` | REST endpoints |
+| `neptun/liveState.js` | The authority for "what is happening now": API first, stream as fallback |
+| `neptun/frameCache.js` | Fingerprint-gated reuse and coalescing of rendered frames |
 | `neptun/mapRenderer.js` | Puppeteer + Leaflet render, legend, captions, render concurrency cap |
 | `neptun/regionResolver.js` | Free-text Ukrainian region/city → region descriptor |
 | `neptun/regionContext.js` | Per-region threat/alert analysis, report and caption builders |
@@ -39,6 +41,7 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/alertWatcher.js` | Polls region alert state, emits alert/all-clear transitions |
 | `neptun/threatIcons.js`, `defaultIcons.js`, `threatMeta.js` | Marker icons and per-type metadata |
 | `fetchWithTimeout.js` | Every outbound HTTP call goes through this |
+| `telegramSender.js` | Paced, retrying queue for unprompted fan-out (alert notifications) |
 
 ## Conventions that matter here
 
@@ -48,10 +51,14 @@ work on Cyrillic, why a promise rather than a boolean guards in-flight work).
 Match that: a comment restating the code is noise, a comment capturing the
 constraint that shaped it is why the next person doesn't reintroduce the bug.
 
-**Never serve stale data as live.** This is an air-raid bot. Caches are gated on
-a fingerprint of the underlying data, `hasSnapshot()` fails closed when the
-stream goes quiet, and the alert watcher skips entirely rather than reason from
-stale state. When in doubt, say nothing rather than say something outdated.
+**Never serve stale data as live.** This is an air-raid bot. Every user-facing
+answer reads the REST API through `neptun/liveState.js` — the stream is the
+fallback for an unreachable API, never the default, because its freshness clock
+is reset by `heartbeat`/`pong` and a live-but-drifted socket looks healthy.
+Rendered frames are reused only while a fingerprint of the data is unchanged
+(`neptun/frameCache.js`), and the alert watcher skips a tick entirely rather
+than reason from state it can't trust. When in doubt, say nothing rather than
+say something outdated.
 
 **Bias asymmetrically.** Alerts go out immediately; all-clears must be
 confirmed. The costs of the two mistakes are not symmetric, and the code should
@@ -59,6 +66,11 @@ show that they were weighed.
 
 **Everything outbound needs a deadline.** Use `fetchWithTimeout`. A bare `fetch`
 against a half-open connection never settles and can wedge a whole code path.
+
+**Unprompted messages go through `telegramSender`.** Replying to a user is one
+message; announcing a raid is one per subscribed chat at once. Anything that
+fans out must be paced and retried — nobody re-asks for a notification they
+never knew was coming, so a swallowed 429 is a lost warning.
 
 **Ukrainian text is user-facing.** Region names are stored in the nominative;
 don't interpolate them into sentences that need another case ("тривога в
