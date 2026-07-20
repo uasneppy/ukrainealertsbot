@@ -9,10 +9,10 @@ import { fetchLatestChannelMessages, formatChannelMessages } from './channelMess
 import { analyzeAlertMessages, analyzeRegionQuery } from './geminiAnalysis.js';
 import { parseRegionQuery, resolveRegion } from './neptun/regionResolver.js';
 import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js';
-import { getOrLaunchBrowser } from './neptun/browser.js';
+import { getOrLaunchBrowser, closeBrowser } from './neptun/browser.js';
 import { renderNeptunMap } from './neptun/mapRenderer.js';
 import { fetchSnapshot } from './neptun/neptunApi.js';
-import { startStream, getState, hasSnapshot, streamAgeMs } from './neptun/neptunStream.js';
+import { startStream, stopStream, getState, hasSnapshot, streamAgeMs } from './neptun/neptunStream.js';
 import { getGeoData } from './neptun/fetchGeo.js';
 
 dotenv.config();
@@ -379,9 +379,35 @@ async function sendRegionWhy(botInstance, chatId, region, userQuery) {
   await botInstance.sendMessage(chatId, text);
 }
 
+// ── Flood control ─────────────────────────────────────────────────────────────
+// Reusing a rendered frame bounds render cost, but every triggering message
+// still produces a *send*. Passive triggers fire on any message containing
+// "тривога", so during a raid an active group is one photo per message and a
+// fast route to Telegram's 429s.
+//
+// The window is per (chat, reply kind) rather than per chat: a generic
+// "тривога" must not silently swallow a deliberate "чому тривога в києві"
+// seconds later — different questions deserve answers, it's the repetition
+// that needs damping. Explicit commands (/map) are exempt: silently swallowing
+// a command reads as a broken bot.
+
+export const CHAT_COOLDOWN_MS = 20_000;
+const lastReplyAt = new Map(); // "chatId:kind" → epoch ms
+
+export function isOnCooldown(key, now = Date.now(), cooldownMs = CHAT_COOLDOWN_MS) {
+  const last = lastReplyAt.get(key) ?? 0;
+  if (now - last < cooldownMs) return true;
+  lastReplyAt.delete(key); // re-insert so eviction order stays least-recent-first
+  lastReplyAt.set(key, now);
+  pruneCache(lastReplyAt, 500);
+  return false;
+}
+
 // ── Bot ───────────────────────────────────────────────────────────────────────
 
-if (token) {
+// `!isTestEnv` matters: tests import the helpers above, and a real BOT_TOKEN in
+// a local .env would otherwise start long-polling (and a browser) mid-suite.
+if (token && !isTestEnv) {
   const bot = new TelegramBot(token, { polling: true });
 
   // Pre-warm on startup: browser, geo cache, NEPTUN stream, first render.
@@ -415,6 +441,17 @@ if (token) {
     const regionQuery = parseRegionQuery(text);
     const regionMatch = regionQuery ? resolveRegion(regionQuery.regionText) : null;
     const focusRegion = regionMatch && regionMatch.kind !== 'country' ? regionMatch : null;
+
+    // Which branch below would fire — computed up front so ordinary chatter
+    // never consumes a cooldown slot, and so the slot is scoped to the kind of
+    // reply (and, for region queries, to the region actually asked about).
+    let replyKind = null;
+    if (focusRegion && regionQuery.why) replyKind = `why:${focusRegion.cacheKey}`;
+    else if (text.includes(CHANNEL_MESSAGE_TRIGGER)) replyKind = 'why';
+    else if (focusRegion) replyKind = `map:${focusRegion.cacheKey}`;
+    else if (text.includes('тривога')) replyKind = 'map';
+
+    if (!replyKind || isOnCooldown(`${chatId}:${replyKind}`)) return;
 
     if (focusRegion && regionQuery.why) {
       try {
@@ -499,4 +536,48 @@ if (token) {
       await bot.sendMessage(chatId, 'Не вдалося побудувати мапу загроз. Спробуй пізніше.');
     }
   });
+
+  // ── Process-level resilience ────────────────────────────────────────────────
+
+  // Long-poll failures (network blips, 409 from a second instance, Telegram
+  // 5xx) are emitted here; unhandled they surface as bare stack traces.
+  bot.on('polling_error', (err) => {
+    console.error('[telegram] Polling error:', err?.code ?? '', err?.message ?? err);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('[process] Unhandled rejection:', reason);
+  });
+
+  // Graceful shutdown. docker-compose already grants a 20 s stop_grace_period
+  // and runs tini as PID 1 — this is the piece that actually uses them, so a
+  // deploy stops polling cleanly and doesn't leave Chromium behind.
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] ${signal} received — stopping…`);
+
+    const timer = setTimeout(() => {
+      console.error('[shutdown] Timed out after 15 s — forcing exit');
+      process.exit(1);
+    }, 15_000);
+    timer.unref();
+
+    try {
+      if (typeof bot.stopPolling === 'function') {
+        await bot.stopPolling({ cancel: true });
+      }
+    } catch (err) {
+      console.error('[shutdown] stopPolling failed:', err?.message ?? err);
+    }
+
+    stopStream();
+    await closeBrowser();
+    console.log('[shutdown] Done');
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

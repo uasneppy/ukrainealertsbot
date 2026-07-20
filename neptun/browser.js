@@ -75,17 +75,43 @@ function getLaunchOptions() {
   return _launchOptionsPromise;
 }
 
-let _activeBrowser = null;
+// The *promise* is the singleton, not the resolved browser. Caching the
+// resolved value instead would let two concurrent callers both pass the null
+// check before either launch settles, leaving an orphaned Chromium alive for
+// the life of the process — a real risk under the container memory cap.
+let _browserPromise = null;
 
 export async function getOrLaunchBrowser() {
-  if (_activeBrowser) return _activeBrowser;
+  if (!_browserPromise) {
+    _browserPromise = (async () => {
+      const options = await getLaunchOptions();
+      const browser = await puppeteer.launch(options);
+      browser.on('disconnected', () => {
+        _browserPromise = null;
+      });
+      return browser;
+    })().catch((err) => {
+      // Don't cache a failed launch — the next request should retry.
+      _browserPromise = null;
+      throw err;
+    });
+  }
 
-  const options = await getLaunchOptions();
-  _activeBrowser = await puppeteer.launch(options);
+  return _browserPromise;
+}
 
-  _activeBrowser.on('disconnected', () => {
-    _activeBrowser = null;
-  });
-
-  return _activeBrowser;
+/**
+ * Closes the shared browser, if one is running. Used on shutdown so Chromium
+ * doesn't outlive the bot process (see the SIGTERM handler in bot.js).
+ */
+export async function closeBrowser() {
+  const pending = _browserPromise;
+  if (!pending) return;
+  _browserPromise = null;
+  try {
+    const browser = await pending;
+    await browser.close();
+  } catch (err) {
+    console.error('[browser] Failed to close cleanly:', err?.message ?? err);
+  }
 }

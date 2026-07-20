@@ -31,8 +31,11 @@ const _alerts = { raions: [], oblasts: [] };
 let _reconnectDelay = 1_000;
 let _ws = null;
 let _started = false;
+let _stopped = false;
 let _receivedSnapshot = false;
 let _lastTrafficAt = 0; // wall-clock ms of the last WS traffic (message or pong)
+let _watchdogTimer = null;
+let _reconnectTimer = null;
 
 /** Returns a point-in-time snapshot of the live state. */
 export function getState() {
@@ -102,6 +105,7 @@ function handleMessage(raw) {
 }
 
 function connect() {
+  if (_stopped) return; // shutdown in progress — don't resurrect the socket
   _ws = new WebSocket(WS_URL);
 
   _ws.on('open', () => {
@@ -120,7 +124,7 @@ function connect() {
     console.log(
       `[neptun-stream] Disconnected (${code}). Reconnecting in ${_reconnectDelay / 1000}s…`
     );
-    setTimeout(connect, _reconnectDelay);
+    _reconnectTimer = setTimeout(connect, _reconnectDelay);
     _reconnectDelay = Math.min(_reconnectDelay * 2, MAX_BACKOFF_MS);
   });
 
@@ -159,9 +163,33 @@ function watchdogTick() {
 export function startStream() {
   if (_started) return;
   _started = true;
+  _stopped = false;
   connect();
-  const timer = setInterval(watchdogTick, WATCHDOG_INTERVAL_MS);
-  timer.unref?.();
+  _watchdogTimer = setInterval(watchdogTick, WATCHDOG_INTERVAL_MS);
+  _watchdogTimer.unref?.();
+}
+
+/**
+ * Stops the stream, its watchdog and any pending reconnect. Used by the
+ * SIGTERM/SIGINT handler in bot.js so a deploy doesn't leave a socket and a
+ * reconnect timer behind while the process is trying to exit.
+ */
+export function stopStream() {
+  _stopped = true;
+  _started = false;
+  if (_reconnectTimer) {
+    clearTimeout(_reconnectTimer);
+    _reconnectTimer = null;
+  }
+  if (_watchdogTimer) {
+    clearInterval(_watchdogTimer);
+    _watchdogTimer = null;
+  }
+  if (_ws) {
+    _ws.removeAllListeners();
+    _ws.terminate();
+    _ws = null;
+  }
 }
 
 /** Test hooks — not used by production code paths. */
