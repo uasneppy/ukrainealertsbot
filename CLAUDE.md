@@ -34,7 +34,7 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/neptunApi.js` | REST endpoints |
 | `neptun/liveState.js` | The authority for "what is happening now": API first, stream as fallback |
 | `neptun/frameCache.js` | Fingerprint-gated reuse and coalescing of rendered frames |
-| `neptun/mapRenderer.js` | Puppeteer + Leaflet render, legend, captions, render concurrency cap |
+| `neptun/mapRenderer.js` | Puppeteer + Leaflet render, legend, captions, render concurrency cap, label placement |
 | `neptun/regionResolver.js` | Free-text Ukrainian region/city → region descriptor |
 | `neptun/regionContext.js` | Per-region threat/alert analysis, report and caption builders |
 | `neptun/subscriptions.js` | Persisted per-chat region subscriptions |
@@ -71,6 +71,14 @@ against a half-open connection never settles and can wedge a whole code path.
 message; announcing a raid is one per subscribed chat at once. Anything that
 fans out must be paced and retried — nobody re-asks for a notification they
 never knew was coming, so a swallowed 429 is a lost warning.
+
+**The map is read in a hurry, on a phone.** Markers carry their type in a
+coloured ring because the icon art can't (user icons are greyscale
+silhouettes). Labels sit on chips because they land on saturated alert fills as
+often as on the base map. City names are repositioned after render to dodge
+markers and panels — Leaflet has no label collision, and a name occluded to
+"уми" is worse than one moved 20 px. Change any of this and re-render the three
+views (`mock`, a city, an oblast) before believing it looks right.
 
 **Ukrainian text is user-facing.** Region names are stored in the nominative;
 don't interpolate them into sentences that need another case ("тривога в

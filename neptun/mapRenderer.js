@@ -74,6 +74,14 @@ export const MAP_COLORS = {
   cityLabel:          '#f2f7fd',
   threatLabel:        '#f4f8fc',  // marker text label (focused/region view)
 
+  // Markers sit on both the dark base map and saturated alert fills. A dark
+  // disc behind the icon keeps it legible on red, and a ring in the threat's
+  // own colour carries the type — the icon art alone can't, since user icons
+  // (icons/*.webp) are greyscale silhouettes that look alike at 40 px.
+  markerDisc:         '#0a1018',
+  labelChip:          'rgba(8,13,22,0.86)',
+  labelChipBorder:    'rgba(122,160,200,0.35)',
+
   panelBg:            'rgba(8,13,22,0.92)',
   panelBorder:        '#243854',
   legendLabel:        '#8ab4d4',
@@ -136,6 +144,32 @@ export function renderQueueStats() {
   return { active: _activeRenders, queued: _renderQueue.length, limit: MAX_CONCURRENT_RENDERS };
 }
 
+/**
+ * Half-extent of a city view, in km.
+ *
+ * Tight enough to see which locality a threat is over, wide enough to include
+ * what the caption and legend count. Framing only threats *inside* the radius
+ * produced maps captioned "Загрози (4)" showing a single marker, with the three
+ * approaching ones off-frame — and during an attack those are the point of
+ * asking. Threats far outside stay off-frame; the caption gives their distance.
+ *
+ * @param {object} opts
+ * @param {number} opts.radiusKm      City radius from the region descriptor
+ * @param {Array}  opts.threatsIn     Threats inside the radius
+ * @param {Array}  opts.threatsNear   Threats outside it but nearby
+ */
+export function computeCityFrameKm({ radiusKm = 60, threatsIn = [], threatsNear = [] } = {}) {
+  const approaching = threatsNear.filter((t) => t.distanceKm <= radiusKm * 1.6);
+  const framed = [...threatsIn, ...approaching];
+
+  let frameKm = framed.length ? 18 : 28;
+  for (const threat of framed) {
+    frameKm = Math.max(frameKm, threat.distanceKm * 1.12 + 6);
+  }
+  // Past this the city itself is a dot and it stops being a city view.
+  return Math.min(frameKm, 95);
+}
+
 function buildSkeletonHtml({ js, css }) {
   const C = MAP_COLORS;
   return `<!DOCTYPE html>
@@ -155,35 +189,50 @@ function buildSkeletonHtml({ js, css }) {
     background: ${C.cityDot}; border: 1.5px solid rgba(5,10,20,0.9);
     box-shadow: 0 0 5px rgba(0,0,0,0.9);
   }
+  /* City names sit on top of alert fills as often as on the base map, so the
+     chip does the work a text-shadow can't on saturated red. */
   .city-name {
-    position: absolute; left: 12px; top: -8px;
+    position: absolute; left: 12px; top: -10px;
     font: 700 15px/1 sans-serif; color: ${C.cityLabel}; white-space: nowrap;
-    text-shadow: 0 1px 3px #000, 0 0 7px rgba(0,0,0,0.95);
     letter-spacing: 0.02em;
+    background: ${C.labelChip}; padding: 2px 7px; border-radius: 5px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.6);
   }
 
-  .threat-emoji {
-    font-size: 26px; line-height: 30px; text-align: center;
-    filter: drop-shadow(0 1px 3px rgba(0,0,0,0.9));
-  }
-  .threat-img { filter: drop-shadow(0 2px 5px rgba(0,0,0,0.85)); }
+  .threat-emoji { font-size: 24px; line-height: 26px; text-align: center; }
   .threat-wrap { display: flex; flex-direction: column; align-items: center; }
+
+  /* Dark disc + type-coloured ring: legible on the dark base map and on a
+     red oblast fill alike, and the ring is what actually distinguishes a
+     БпЛА from a ракета at a glance. */
+  .threat-badge {
+    width: 38px; height: 38px; border-radius: 50%;
+    background: ${C.markerDisc};
+    display: flex; align-items: center; justify-content: center;
+    border: 2.5px solid #9aa7b5;
+    box-shadow: 0 0 0 1.5px rgba(6,10,18,0.9), 0 2px 8px rgba(0,0,0,0.75);
+  }
+  .threat-badge img { width: 27px; height: 27px; object-fit: contain; display: block; }
+
   .threat-label {
-    margin-top: 2px; font: 700 11px/1.15 sans-serif; color: ${C.threatLabel};
-    white-space: nowrap; text-shadow: 0 1px 2px #000, 0 0 6px #000;
+    margin-top: 4px; font: 700 12px/1.2 sans-serif; color: ${C.threatLabel};
+    white-space: nowrap;
+    background: ${C.labelChip}; border: 1px solid ${C.labelChipBorder};
+    padding: 2px 7px; border-radius: 5px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.6);
   }
 
   .legend {
     position: fixed; bottom: 18px; right: 18px;
     background: ${C.panelBg}; border: 1px solid ${C.panelBorder};
-    border-radius: 8px; padding: 10px 14px; z-index: 1000; font-family: sans-serif;
+    border-radius: 10px; padding: 11px 15px; z-index: 1000; font-family: sans-serif;
   }
-  .legend-title { color: ${C.legendLabel}; font-size: 11px; font-weight: bold;
+  .legend-title { color: ${C.legendLabel}; font-size: 12px; font-weight: bold;
     text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
-  .legend-item { display: flex; align-items: center; gap: 7px;
-    color: ${C.legendText}; font-size: 12px; margin: 3px 0; }
+  .legend-item { display: flex; align-items: center; gap: 8px;
+    color: ${C.legendText}; font-size: 13px; margin: 4px 0; }
   .legend-alert { display: flex; align-items: center; gap: 7px;
-    color: ${C.legendText}; font-size: 12px; margin: 4px 0 0; }
+    color: ${C.legendText}; font-size: 13px; margin: 5px 0 0; }
   .alert-swatch { width: 14px; height: 10px; border-radius: 2px; flex-shrink: 0; }
   .alert-swatch-raion  { background: ${C.raionAlertFill}66; border: 1px solid ${C.raionAlertBorder}; }
   .alert-swatch-oblast { background: ${C.oblastAlertFill}99; border: 1px solid ${C.oblastAlertBorder}; }
@@ -191,8 +240,8 @@ function buildSkeletonHtml({ js, css }) {
   .title-bar {
     position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
     background: ${C.panelBg}; border: 1px solid ${C.panelBorder};
-    border-radius: 8px; padding: 6px 18px; z-index: 1000;
-    font-family: sans-serif; color: ${C.legendLabel}; font-size: 13px;
+    border-radius: 8px; padding: 7px 20px; z-index: 1000;
+    font-family: sans-serif; color: ${C.legendLabel}; font-size: 14px; white-space: nowrap;
     display: flex; align-items: center; gap: 10px;
   }
   .title-dot { width: 8px; height: 8px; border-radius: 50%; background: ${C.titleDot};
@@ -247,13 +296,13 @@ function _renderOnPage(payload) {
   // 1. Oblast fills — whole-oblast alert → strong red "active" tone
   L.geoJSON(oblasts, {
     style: (f) => (oblastSet.has(featKey(f))
-      ? { stroke: false, fillColor: C.oblastAlertFill, fillOpacity: 0.60 }
+      ? { stroke: false, fillColor: C.oblastAlertFill, fillOpacity: 0.42 }
       : { stroke: false, fillColor: C.oblastFill, fillOpacity: 0.94 }),
   }).addTo(map);
 
   // 2. Raion grid — thin borders for texture
   L.geoJSON(raions, {
-    style: () => ({ color: C.raionGrid, weight: 0.55, opacity: 0.85, fill: false }),
+    style: () => ({ color: C.raionGrid, weight: 0.7, opacity: 0.9, fill: false }),
   }).addTo(map);
 
   // 3. Alerted raions — amber "watch" fill (individual districts, lower
@@ -282,7 +331,7 @@ function _renderOnPage(payload) {
     focusFeature = ((oblasts && oblasts.features) || []).find((f) => featKey(f) === focusView.key) || null;
   }
   if (focusFeature) {
-    map.fitBounds(L.geoJSON(focusFeature).getBounds(), { padding: [26, 26] });
+    map.fitBounds(L.geoJSON(focusFeature).getBounds(), { padding: [64, 64], animate: false });
     L.geoJSON(focusFeature, {
       style: () => ({ color: C.focusOutline, weight: 2.6, opacity: 0.95, fill: false, dashArray: '6 4' }),
     }).addTo(map);
@@ -294,13 +343,13 @@ function _renderOnPage(payload) {
     const dLon = halfKm / (111.32 * Math.cos((focusView.lat * Math.PI) / 180));
     map.fitBounds(
       [[focusView.lat - dLat, focusView.lon - dLon], [focusView.lat + dLat, focusView.lon + dLon]],
-      { padding: [8, 8] }
+      { padding: [56, 56], animate: false }
     );
     L.circleMarker([focusView.lat, focusView.lon], {
       radius: 11, color: C.focusCityRing, weight: 2, opacity: 0.95, fill: false, dashArray: '2 3',
     }).addTo(map);
   } else {
-    map.fitBounds(L.geoJSON(ukraine).getBounds(), { padding: [12, 12] });
+    map.fitBounds(L.geoJSON(ukraine).getBounds(), { padding: [26, 26], animate: false });
   }
 
   // 6. City labels (below threat markers)
@@ -336,9 +385,14 @@ function _renderOnPage(payload) {
   // 6c. Focused mode: flight trails + course vectors. NEPTUN positions are
   //     precise, so the past track and an arrow of the current heading make
   //     it obvious over which locality a threat flies and where it's going.
+  // Shrunk slightly so a marker right on the edge — whose label would be
+  // sliced by the canvas — counts as outside.
+  const viewBounds = map.getBounds().pad(-0.03);
+  const inView = (t) => viewBounds.contains([t.lat, t.lon]);
+
   const kmToDeg = (lat, km) => [km / 110.574, km / (111.32 * Math.cos((lat * Math.PI) / 180))];
   threats.forEach((t) => {
-    if (typeof t.lat !== 'number' || typeof t.lon !== 'number') return;
+    if (typeof t.lat !== 'number' || typeof t.lon !== 'number' || !inView(t)) return;
     const color = (typeMeta[t.type] && typeMeta[t.type].color) || '#9aa7b5';
     if (Array.isArray(t.trail) && t.trail.length) {
       L.polyline(t.trail.concat([[t.lat, t.lon]]), {
@@ -364,36 +418,39 @@ function _renderOnPage(payload) {
     }
   });
 
-  // 7. Threat markers — user icon or built-in badge; unknown types get the
-  //    "unknown" badge (emoji divIcon only as a last-resort fallback).
-  //    In focused (region) mode each marker also carries a text label.
+  // 7. Threat markers. Every marker is a badge: a dark disc so the icon reads
+  //    on a red oblast fill, ringed in the threat's own colour so the type is
+  //    identifiable at a glance — the icon art can't do that on its own, since
+  //    user icons are greyscale silhouettes that look alike at this size.
+  //    In focused (region) mode the marker also carries a text label.
   threats.forEach((t) => {
-    if (typeof t.lat !== 'number' || typeof t.lon !== 'number') return;
+    if (typeof t.lat !== 'number' || typeof t.lon !== 'number' || !inView(t)) return;
+    const meta = typeMeta[t.type] || {};
+    const color = meta.color || '#9aa7b5';
     const iconUrl = iconDataUrls[t.type] || iconDataUrls.unknown;
-    let icon;
-    if (t.label) {
-      const visual = iconUrl
-        ? '<img src="' + iconUrl + '" style="width:38px;height:38px" class="threat-img">'
-        : '<div class="threat-emoji">' + ((typeMeta[t.type] && typeMeta[t.type].emoji) || '❓') + '</div>';
-      icon = L.divIcon({
+    const inner = iconUrl
+      ? '<img src="' + iconUrl + '" alt="">'
+      : '<div class="threat-emoji">' + (meta.emoji || '❓') + '</div>';
+    const badge = '<div class="threat-badge" style="border-color:' + color + '">' + inner + '</div>';
+
+    const icon = t.label
+      ? L.divIcon({
         className: '',
-        iconSize: [160, 60],
-        iconAnchor: [80, 19],
-        html: '<div class="threat-wrap">' + visual + '<div class="threat-label">' + t.label + '</div></div>',
-      });
-    } else if (iconUrl) {
-      icon = L.icon({ iconUrl, iconSize: [38, 38], iconAnchor: [19, 19], className: 'threat-img' });
-    } else {
-      icon = L.divIcon({
+        iconSize: [200, 70],
+        iconAnchor: [100, 19],
+        html: '<div class="threat-wrap">' + badge + '<div class="threat-label">' + t.label + '</div></div>',
+      })
+      : L.divIcon({
         className: '',
-        iconSize: [30, 30],
-        iconAnchor: [15, 15],
-        html: '<div class="threat-emoji">' + ((typeMeta[t.type] && typeMeta[t.type].emoji) || '❓') + '</div>',
+        iconSize: [38, 38],
+        iconAnchor: [19, 19],
+        html: badge,
       });
-    }
+
     L.marker([t.lat, t.lon], { interactive: false, keyboard: false, zIndexOffset: 1000, icon }).addTo(map);
   });
   /* eslint-enable no-undef */
+
 
   // Legend — display names for unknown threat types come from the feed's
   // `title`, i.e. untrusted input: escape anything interpolated into HTML.
@@ -404,7 +461,7 @@ function _renderOnPage(payload) {
     const meta = typeMeta[type];
     const legendUrl = iconDataUrls[type] || iconDataUrls.unknown;
     const visual = legendUrl
-      ? '<img src="' + legendUrl + '" style="width:16px;height:16px;object-fit:contain">'
+      ? '<img src="' + legendUrl + '" style="width:18px;height:18px;object-fit:contain">'
       : '<span style="font-size:14px;line-height:1">' + meta.emoji + '</span>';
     return '<div class="legend-item">' + visual + '<span>' + esc(meta.name) + ' ×' + meta.count + '</span></div>';
   }).join('');
@@ -424,6 +481,64 @@ function _renderOnPage(payload) {
     + '<span style="color:#607a94;font-size:11px">' + timestamp + '</span></div>';
 
   document.body.insertAdjacentHTML('beforeend', legendHtml + titleHtml);
+
+  // Keep city names readable. Runs after the panels are inserted, or they
+  // aren't in the DOM to be measured and a name ends up under the legend. Leaflet has no label collision, so a name
+  //    parked to the right of its dot lands under whatever marker or panel
+  //    happens to be there — "Київ" rendered as "в". A half-covered marker is
+  //    still identifiable by its coloured ring; a half-covered name is noise.
+  //    So the names move, trying positions around the dot until one is clear.
+  const rectsOverlap = (a, b) =>
+    !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom);
+  const grow = (r, p) => ({ left: r.left - p, top: r.top - p, right: r.right + p, bottom: r.bottom + p });
+
+  const obstacles = [];
+  document.querySelectorAll('.threat-badge, .threat-label, .legend, .title-bar').forEach((el) => {
+    obstacles.push(grow(el.getBoundingClientRect(), 3));
+  });
+
+  const placedLabels = [];
+  document.querySelectorAll('.city-name').forEach((label) => {
+    const w = label.offsetWidth;
+    const h = label.offsetHeight;
+    const positions = [
+      { left: 12, top: -10 },              // default: right of the dot
+      { left: -(w + 10), top: -10 },       // left
+      { left: -(w / 2), top: -(h + 12) },  // above
+      { left: -(w / 2), top: 16 },         // below
+      { left: 12, top: -(h + 14) },        // upper right
+      { left: 12, top: 16 },               // lower right
+      { left: -(w + 10), top: -(h + 14) }, // upper left
+      { left: -(w + 10), top: 16 },        // lower left
+      // Farther out: when a threat marker sits directly on the city, every
+      // close position still lands on the 38 px badge — "Суми" rendered as
+      // "уми". These clear it.
+      { left: 30, top: -10 },
+      { left: -(w + 28), top: -10 },
+      { left: -(w / 2), top: -(h + 30) },
+      { left: -(w / 2), top: 34 },
+    ];
+
+    let placed = false;
+    for (const pos of positions) {
+      label.style.left = pos.left + 'px';
+      label.style.top = pos.top + 'px';
+      const box = grow(label.getBoundingClientRect(), 2);
+      const clashes =
+        obstacles.some((o) => rectsOverlap(box, o)) ||
+        placedLabels.some((o) => rectsOverlap(box, o));
+      if (!clashes) {
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      // Nowhere clean — keep the conventional position rather than inventing one.
+      label.style.left = '12px';
+      label.style.top = '-10px';
+    }
+    placedLabels.push(grow(label.getBoundingClientRect(), 2));
+  });
 
   window.__mapReady = true;
 }
@@ -520,12 +635,11 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
     if (focus && focus.kind === 'oblast') {
       focusView = { kind: 'oblast', key: focus.geoKey, name: focus.name };
     } else if (focus) {
-      // Tight adaptive frame for cities: hug the city and the threats actually
-      // near it, so the exact locality a threat flies over is clearly visible.
-      const inCity = focusStatus ? focusStatus.threatsIn : [];
-      let frameKm = inCity.length ? 18 : 28;
-      for (const t of inCity) frameKm = Math.max(frameKm, t.distanceKm * 1.25 + 6);
-      frameKm = Math.min(frameKm, focus.radiusKm ?? 60);
+      const frameKm = computeCityFrameKm({
+        radiusKm: focus.radiusKm ?? 60,
+        threatsIn: focusStatus ? focusStatus.threatsIn : [],
+        threatsNear: focusStatus ? focusStatus.threatsNear : [],
+      });
       focusView = {
         kind: 'city', name: focus.name, lat: focus.lat, lon: focus.lon,
         radiusKm: focus.radiusKm ?? 60, frameKm,
