@@ -51,6 +51,10 @@ services:
     volumes:
       # Persist the GeoJSON cache so boundaries aren't re-downloaded on restart.
       - geo-cache:/app/neptun/geo
+      # Region subscriptions. This one is not just an optimisation: without it
+      # every `docker compose up` silently drops everyone's subscriptions, and
+      # nobody finds out until an alert they were waiting for never arrives.
+      - subscriptions:/app/data
       # Custom threat icons — drop image files into ./icons on the host and the
       # next render picks them up live; no rebuild or restart needed
       # (see icons/README.md for file naming).
@@ -58,3 +62,4 @@ services:
 
 volumes:
   geo-cache:
+  subscriptions:
