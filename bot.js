@@ -14,6 +14,15 @@ import { renderNeptunMap } from './neptun/mapRenderer.js';
 import { fetchSnapshot } from './neptun/neptunApi.js';
 import { startStream, stopStream, getState, hasSnapshot, streamAgeMs } from './neptun/neptunStream.js';
 import { getGeoData } from './neptun/fetchGeo.js';
+import {
+  loadSubscriptions,
+  flushSubscriptions,
+  subscribe,
+  unsubscribe,
+  listSubscriptions,
+  MAX_PER_CHAT,
+} from './neptun/subscriptions.js';
+import { createAlertWatcher, formatAlertNotification } from './neptun/alertWatcher.js';
 
 dotenv.config();
 
@@ -410,6 +419,31 @@ export function isOnCooldown(key, now = Date.now(), cooldownMs = CHAT_COOLDOWN_M
   return false;
 }
 
+// ── Subscription replies ──────────────────────────────────────────────────────
+// Text builders kept separate from the handlers so they can be unit-tested.
+
+export function formatSubscribeReply(result, query) {
+  if (result.ok) {
+    return `✅ Підписано на сповіщення: ${result.region.name}\nНадсилатиму тривогу та відбій.`;
+  }
+  switch (result.reason) {
+    case 'duplicate':
+      return `ℹ️ Підписка на ${result.region.name} вже активна.`;
+    case 'limit':
+      return `⚠️ Досягнуто ліміт підписок (${MAX_PER_CHAT}). Спочатку відпишись від зайвого: /unsubscribe`;
+    default:
+      return `❓ Не вдалося розпізнати регіон «${query}».\nСпробуй: /subscribe київ або /subscribe харківщина`;
+  }
+}
+
+export function formatSubscriptionList(subs) {
+  if (!subs.length) {
+    return 'Підписок немає.\nДодати: /subscribe <регіон>, напр. /subscribe київщина';
+  }
+  const lines = subs.map((sub) => `• ${sub.name}`);
+  return `🔔 Активні підписки (${subs.length}):\n${lines.join('\n')}\n\nВідписатися: /unsubscribe <регіон> або /unsubscribe all`;
+}
+
 // ── Bot ───────────────────────────────────────────────────────────────────────
 
 // `!isTestEnv` matters: tests import the helpers above, and a real BOT_TOKEN in
@@ -420,11 +454,32 @@ if (token && !isTestEnv) {
   // Pre-warm on startup: browser, geo cache, NEPTUN stream, first render.
   // Warm-ups only prime the browser/Gemini path — every user request still
   // fetches live data and re-renders whenever that data has changed.
+  // ── Alert watcher ───────────────────────────────────────────────────────────
+  // Only ever reasons about fresh stream state: returning null here is what
+  // stops a dead socket from being read as "відбій" for every subscriber.
+  const alertWatcher = createAlertWatcher({
+    getSnapshot: () =>
+      (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS ? getState() : null),
+    getGeo: getGeoData,
+    notify: async ({ region, chatIds, active, status }) => {
+      const text = formatAlertNotification({ region, active, status });
+      for (const chatId of chatIds) {
+        try {
+          await bot.sendMessage(chatId, text);
+        } catch (err) {
+          // Blocked bot / deleted chat — log and keep going for the others.
+          console.error(`[alert-watcher] send to ${chatId} failed:`, err?.message ?? err);
+        }
+      }
+    },
+  });
+
   (async () => {
     try {
       await getOrLaunchBrowser();
       startStream();
-      await getGeoData();
+      await Promise.all([getGeoData(), loadSubscriptions()]);
+      alertWatcher.start();
       getLiveNeptunMap().catch((err) =>
         console.error('[startup] Map warm-up failed:', err?.message ?? err)
       );
@@ -544,6 +599,65 @@ if (token && !isTestEnv) {
     }
   });
 
+  // ── Subscription commands ───────────────────────────────────────────────────
+
+  bot.onText(/^\/subscribe(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const query = match?.[1]?.trim();
+    if (!query) {
+      await bot.sendMessage(
+        chatId,
+        'Вкажи регіон: /subscribe київ, /subscribe харківщина\nПоточні підписки: /subscriptions'
+      );
+      return;
+    }
+    try {
+      const result = subscribe(chatId, query);
+      await bot.sendMessage(chatId, formatSubscribeReply(result, query));
+    } catch (error) {
+      console.error('Failed to subscribe:', error);
+      await bot.sendMessage(chatId, 'Не вдалося оформити підписку. Спробуй пізніше.');
+    }
+  });
+
+  bot.onText(/^\/unsubscribe(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const arg = match?.[1]?.trim();
+    try {
+      if (!arg || arg.toLowerCase() === 'all' || arg.toLowerCase() === 'всі') {
+        const { removed } = unsubscribe(chatId);
+        await bot.sendMessage(
+          chatId,
+          removed ? `✅ Скасовано підписок: ${removed}` : 'Підписок не було.'
+        );
+        return;
+      }
+      const region = resolveRegion(arg);
+      if (!region || region.kind === 'country') {
+        await bot.sendMessage(chatId, `❓ Не вдалося розпізнати регіон «${arg}».`);
+        return;
+      }
+      const { removed } = unsubscribe(chatId, region.cacheKey);
+      await bot.sendMessage(
+        chatId,
+        removed ? `✅ Підписку скасовано: ${region.name}` : `Підписки на ${region.name} не було.`
+      );
+    } catch (error) {
+      console.error('Failed to unsubscribe:', error);
+      await bot.sendMessage(chatId, 'Не вдалося скасувати підписку. Спробуй пізніше.');
+    }
+  });
+
+  bot.onText(/^\/subscriptions(?:@\S+)?$/, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      await bot.sendMessage(chatId, formatSubscriptionList(listSubscriptions(chatId)));
+    } catch (error) {
+      console.error('Failed to list subscriptions:', error);
+      await bot.sendMessage(chatId, 'Не вдалося отримати список підписок.');
+    }
+  });
+
   // ── Process-level resilience ────────────────────────────────────────────────
 
   // Long-poll failures (network blips, 409 from a second instance, Telegram
@@ -579,7 +693,10 @@ if (token && !isTestEnv) {
       console.error('[shutdown] stopPolling failed:', err?.message ?? err);
     }
 
+    alertWatcher.stop();
     stopStream();
+    // Let any queued subscription write land before the process goes away.
+    await flushSubscriptions();
     await closeBrowser();
     console.log('[shutdown] Done');
     process.exit(0);

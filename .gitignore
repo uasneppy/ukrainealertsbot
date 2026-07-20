@@ -7,3 +7,6 @@ neptun/geo/
 
 # macOS Finder metadata
 .DS_Store
+
+# Local subscription store — runtime state, never committed.
+data/
