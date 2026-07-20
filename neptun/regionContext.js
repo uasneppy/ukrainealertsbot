@@ -172,7 +172,6 @@ const minSince = (entries) => {
 export function buildRegionStatus({ region, threats = [], alerts = {}, geo = {} }) {
   const oblastEntries = alerts.oblasts ?? [];
   const raionEntries = alerts.raions ?? [];
-  const oblastKeySet = new Set(extractAlertKeys(oblastEntries));
   const raionKeySet = new Set(extractAlertKeys(raionEntries));
 
   const threatsIn = [];
@@ -273,9 +272,6 @@ export function buildRegionStatus({ region, threats = [], alerts = {}, geo = {} 
 
   threatsIn.sort((a, b) => a.distanceKm - b.distanceKm);
   threatsNear.sort((a, b) => a.distanceKm - b.distanceKm);
-  // Oblast fill on the national layers already needs no oblastKeySet here —
-  // it is used only to answer "чи область у тривозі" for city regions above.
-  void oblastKeySet;
 
   return {
     region,
@@ -300,9 +296,7 @@ const alertLine = (status) => {
   const { region, alertScope, alertSince, alertedRaions } = status;
   switch (alertScope) {
     case 'oblast':
-      return region.kind === 'city'
-        ? `🔴 Тривога — вся область${sinceSuffix(alertSince)}`
-        : `🔴 Тривога — вся область${sinceSuffix(alertSince)}`;
+      return `🔴 Тривога — вся область${sinceSuffix(alertSince)}`;
     case 'city':
       return `🔴 Тривога у м. ${region.name}${sinceSuffix(alertSince)}`;
     case 'raion':

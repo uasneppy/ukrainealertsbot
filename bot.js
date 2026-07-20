@@ -327,6 +327,17 @@ function pruneCache(map, maxEntries = 40) {
   while (map.size > maxEntries) map.delete(map.keys().next().value);
 }
 
+/**
+ * Writes to an insertion-ordered cache, refreshing the key's position first.
+ * Map.set on an existing key keeps its original slot, so without the delete
+ * the most-requested region is evicted on the same schedule as a cold one.
+ */
+function setCacheEntry(map, key, value, maxEntries = 40) {
+  map.delete(key);
+  map.set(key, value);
+  pruneCache(map, maxEntries);
+}
+
 async function sendRegionMap(botInstance, chatId, region) {
   botInstance.sendChatAction(chatId, 'upload_photo').catch(() => {});
   const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
@@ -337,8 +348,7 @@ async function sendRegionMap(botInstance, chatId, region) {
     return;
   }
   const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
-  regionMapCache.set(region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
-  pruneCache(regionMapCache);
+  setCacheEntry(regionMapCache, region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
   await botInstance.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
 }
 
@@ -374,8 +384,7 @@ async function sendRegionWhy(botInstance, chatId, region, userQuery) {
     console.error('Region Gemini analysis failed, sending NEPTUN report:', error?.message ?? error);
     text = `${report}\n\n⚠️ AI-аналіз тимчасово недоступний — вище наведено живі дані NEPTUN.`;
   }
-  regionWhyCache.set(region.cacheKey, { text, fp, takenAt: Date.now() });
-  pruneCache(regionWhyCache);
+  setCacheEntry(regionWhyCache, region.cacheKey, { text, fp, takenAt: Date.now() });
   await botInstance.sendMessage(chatId, text);
 }
 
@@ -397,9 +406,7 @@ const lastReplyAt = new Map(); // "chatId:kind" → epoch ms
 export function isOnCooldown(key, now = Date.now(), cooldownMs = CHAT_COOLDOWN_MS) {
   const last = lastReplyAt.get(key) ?? 0;
   if (now - last < cooldownMs) return true;
-  lastReplyAt.delete(key); // re-insert so eviction order stays least-recent-first
-  lastReplyAt.set(key, now);
-  pruneCache(lastReplyAt, 500);
+  setCacheEntry(lastReplyAt, key, now, 500);
   return false;
 }
 
