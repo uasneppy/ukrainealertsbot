@@ -24,6 +24,8 @@ import {
 } from './neptun/subscriptions.js';
 import { createAlertWatcher, formatAlertNotification } from './neptun/alertWatcher.js';
 import { createSender } from './telegramSender.js';
+import { createSnapshotSource } from './neptun/liveState.js';
+import { createFrameCache } from './neptun/frameCache.js';
 
 dotenv.config();
 
@@ -224,25 +226,20 @@ export async function handleChannelMessageRequest({
 // How fresh the WebSocket state must be to be trusted. Beyond this age the
 // stream is treated as stale (half-open socket, reconnect in progress) and the
 // data comes from a one-off REST fetch, so replies always reflect the live map.
-const STREAM_FRESH_MS = 60_000;
+// Every user-facing answer reads the API. The stream's freshness clock is reset
+// by heartbeat and pong, so a live-but-drifted socket looks healthy while its
+// state is wrong, and nothing reconciled it — which is how a map ends up
+// disagreeing with the API while missiles are inbound. Stream state is now the
+// fallback for an unreachable API, not the default. See neptun/liveState.js.
+const liveSnapshot = createSnapshotSource({
+  fetchSnapshot,
+  getState,
+  hasSnapshot,
+  streamAgeMs,
+});
 
-/**
- * Returns the current NEPTUN state, always favouring live data:
- * fresh WebSocket state → REST fetch → last known stream state (last resort).
- */
 async function getNeptunMapData() {
-  if (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS) {
-    return getState();
-  }
-  try {
-    return await fetchSnapshot();
-  } catch (err) {
-    if (hasSnapshot()) {
-      console.warn('[neptun] REST fetch failed, using last stream state:', err?.message ?? err);
-      return getState();
-    }
-    throw err;
-  }
+  return liveSnapshot.get();
 }
 
 const jsonCompare = (a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b));
@@ -270,27 +267,18 @@ export function dataFingerprint({ threats = [], alerts = {} } = {}) {
 // serve an outdated picture.
 const MAP_REUSE_MS = 15_000;
 
-let neptunMapCache = { buffer: null, caption: null, fp: null, takenAt: 0 };
-let neptunMapRenderInFlight = null;
+// The frame is keyed on a fingerprint of the data, so a picture is only ever
+// reused while nothing has moved. See neptun/frameCache.js for why coalescing
+// on "a render is running" (without checking the data) served stale maps.
+const mapFrames = createFrameCache({
+  render: ({ threats, alerts, geo }) => renderNeptunMap({ threats, alerts, geo }),
+  reuseMs: MAP_REUSE_MS,
+});
 
 async function getLiveNeptunMap() {
   const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
   const fp = dataFingerprint({ threats, alerts });
-  const cached = neptunMapCache;
-  if (cached.buffer && cached.fp === fp && Date.now() - cached.takenAt < MAP_REUSE_MS) {
-    return cached;
-  }
-  if (neptunMapRenderInFlight) return neptunMapRenderInFlight; // coalesce concurrent asks
-  neptunMapRenderInFlight = (async () => {
-    try {
-      const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
-      neptunMapCache = { buffer, caption, fp, takenAt: Date.now() };
-      return neptunMapCache;
-    } finally {
-      neptunMapRenderInFlight = null;
-    }
-  })();
-  return neptunMapRenderInFlight;
+  return mapFrames.get(fp, { threats, alerts, geo });
 }
 
 // ── Gemini analysis — reused only while the channel feed is unchanged ────────
@@ -472,8 +460,9 @@ if (token && !isTestEnv) {
   });
 
   const alertWatcher = createAlertWatcher({
-    getSnapshot: () =>
-      (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS ? getState() : null),
+    // Same authority as the maps: notifications and pictures must never
+    // disagree. null when nothing trustworthy is available, so the tick skips.
+    getSnapshot: () => liveSnapshot.getOrNull(),
     getGeo: getGeoData,
     // Enqueue and return: the tick must not sit waiting on a fan-out that is
     // paced over seconds, or ticks would overlap during a nationwide alert.
@@ -599,7 +588,8 @@ if (token && !isTestEnv) {
     }
     bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
     try {
-      const [{ threats, alerts }, geo] = await Promise.all([fetchSnapshot(), getGeoData()]);
+      // Same source as every other reply, so /map can't disagree with «тривога».
+      const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
       const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
       await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
     } catch (error) {
