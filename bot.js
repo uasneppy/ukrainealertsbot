@@ -10,7 +10,7 @@ import { analyzeAlertMessages, analyzeRegionQuery } from './geminiAnalysis.js';
 import { parseRegionQuery, resolveRegion } from './neptun/regionResolver.js';
 import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js';
 import { getOrLaunchBrowser, closeBrowser } from './neptun/browser.js';
-import { renderNeptunMap } from './neptun/mapRenderer.js';
+import { renderNeptunMap, buildNationalReport } from './neptun/mapRenderer.js';
 import { fetchSnapshot } from './neptun/neptunApi.js';
 import { startStream, stopStream, getState, hasSnapshot, streamAgeMs } from './neptun/neptunStream.js';
 import { getGeoData } from './neptun/fetchGeo.js';
@@ -23,6 +23,11 @@ import {
   MAX_PER_CHAT,
 } from './neptun/subscriptions.js';
 import { createAlertWatcher, formatAlertNotification } from './neptun/alertWatcher.js';
+import {
+  loadAlertState,
+  recordAlertState,
+  flushAlertState,
+} from './neptun/alertState.js';
 import { createSender } from './telegramSender.js';
 import { createSnapshotSource } from './neptun/liveState.js';
 import { createFrameCache } from './neptun/frameCache.js';
@@ -345,9 +350,22 @@ async function sendRegionMap(botInstance, chatId, region) {
     await botInstance.sendPhoto(chatId, cached.buffer, { caption: cached.caption ?? undefined });
     return;
   }
-  const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
-  setCacheEntry(regionMapCache, region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
-  await botInstance.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
+  try {
+    const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
+    setCacheEntry(regionMapCache, region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
+    await botInstance.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
+  } catch (error) {
+    // Chromium died, the render timed out, the queue is wedged — the answer is
+    // still known, it just can't be drawn. Sending "не вдалося" here throws away
+    // facts we are holding: alert state, what's in the region, distances,
+    // headings. A text report is a degraded answer; an apology is no answer.
+    console.error('Region render failed, sending text report:', error?.message ?? error);
+    const status = buildRegionStatus({ region, threats, alerts, geo });
+    await botInstance.sendMessage(
+      chatId,
+      `${formatRegionReport(status)}\n\n🗺 Мапу зараз не вдалося побудувати.`
+    );
+  }
 }
 
 async function sendRegionWhy(botInstance, chatId, region, userQuery) {
@@ -459,7 +477,14 @@ if (token && !isTestEnv) {
     },
   });
 
+  // Filled in by the pre-warm below, before the watcher starts ticking. Holds
+  // what subscribers were last told, so a restart mid-raid doesn't swallow the
+  // transition that happened while the process was down.
+  const persistedAlertState = {};
+
   const alertWatcher = createAlertWatcher({
+    initialStates: persistedAlertState,
+    onStateChange: recordAlertState,
     // Same authority as the maps: notifications and pictures must never
     // disagree. null when nothing trustworthy is available, so the tick skips.
     getSnapshot: () => liveSnapshot.getOrNull(),
@@ -476,7 +501,14 @@ if (token && !isTestEnv) {
     try {
       await getOrLaunchBrowser();
       startStream();
-      await Promise.all([getGeoData(), loadSubscriptions()]);
+      const [, , alertState] = await Promise.all([
+        getGeoData(),
+        loadSubscriptions(),
+        loadAlertState(),
+      ]);
+      // Object.assign so the watcher's captured reference sees it — the
+      // watcher is constructed before this async pre-warm finishes.
+      Object.assign(persistedAlertState, alertState);
       alertWatcher.start();
       getLiveNeptunMap().catch((err) =>
         console.error('[startup] Map warm-up failed:', err?.message ?? err)
@@ -563,8 +595,18 @@ if (token && !isTestEnv) {
           await bot.sendMessage(chatId, 'Не вдалося отримати мапу загроз.');
         }
       } catch (error) {
-        console.error('Failed to send NEPTUN map (тривога):', error);
-        await bot.sendMessage(chatId, 'Не вдалося отримати мапу загроз.');
+        // Same reasoning as the region path: the data is known even when it
+        // can't be drawn, so answer in text rather than apologising.
+        console.error('Failed to send NEPTUN map (тривога):', error?.message ?? error);
+        try {
+          const { threats, alerts } = await getNeptunMapData();
+          await bot.sendMessage(
+            chatId,
+            `${buildNationalReport({ threats, alerts })}\n\n🗺 Мапу зараз не вдалося побудувати.`
+          );
+        } catch {
+          await bot.sendMessage(chatId, 'Не вдалося отримати мапу загроз.');
+        }
       }
       return;
     }
@@ -697,8 +739,8 @@ if (token && !isTestEnv) {
     // Deliver whatever is still queued — an alert notification abandoned
     // mid-fan-out is one nobody will ever be told about.
     await notificationSender.drain();
-    // Let any queued subscription write land before the process goes away.
-    await flushSubscriptions();
+    // Let any queued subscription/state write land before the process goes away.
+    await Promise.all([flushSubscriptions(), flushAlertState()]);
     await closeBrowser();
     console.log('[shutdown] Done');
     process.exit(0);
