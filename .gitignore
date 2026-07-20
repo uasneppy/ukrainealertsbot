@@ -1,2 +1,9 @@
 node_modules/
+neptun/geo/
 
+# Local secrets — never commit. Use .env.example as the template.
+.env
+
+
+# macOS Finder metadata
+.DS_Store

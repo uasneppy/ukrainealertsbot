@@ -1,4 +1,10 @@
+import { fetchWithTimeout } from './fetchWithTimeout.js';
+
 export const CHANNEL_URL = 'https://t.me/s/kpszsu';
+
+/** t.me is scraped on the "чому тривога" path — keep the wait short. */
+const CHANNEL_TIMEOUT_MS = 10_000;
+
 const MESSAGE_SELECTOR_REGEX = /<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/gi;
 
 const NAMED_ENTITIES = Object.freeze({
@@ -85,13 +91,18 @@ export function extractMessageContents(html, limit = 10) {
   return latestMessages;
 }
 
-export async function fetchLatestChannelMessages({ limit = 10, fetchFn = globalThis.fetch, url = CHANNEL_URL } = {}) {
+export async function fetchLatestChannelMessages({
+  limit = 10,
+  fetchFn = globalThis.fetch,
+  url = CHANNEL_URL,
+  timeoutMs = CHANNEL_TIMEOUT_MS,
+} = {}) {
   if (typeof fetchFn !== 'function') {
     throw new Error('fetchFn must be a function');
   }
 
   const safeLimit = sanitizeLimit(limit);
-  const response = await fetchFn(url);
+  const response = await fetchWithTimeout(url, { fetchFn, timeoutMs });
 
   if (!response || typeof response.text !== 'function') {
     throw new Error('Invalid response returned from fetch');

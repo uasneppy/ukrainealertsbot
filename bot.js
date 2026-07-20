@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import TelegramBot from 'node-telegram-bot-api';
 import puppeteer from 'puppeteer';
 import chromium from '@sparticuz/chromium';
@@ -253,32 +255,119 @@ async function getCachedNeptunMap() {
 // ── Gemini analysis cache ─────────────────────────────────────────────────────
 
 const ANALYSIS_TTL_MS = 120_000;
-let analysisCache = { text: null, takenAt: 0, refreshing: false };
+let analysisCache = { text: null, fp: null, takenAt: 0 };
+let analysisInFlight = null;
 
-async function refreshAnalysisCache() {
-  if (analysisCache.refreshing) return;
-  analysisCache.refreshing = true;
-  try {
-    const messages = await fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT });
-    const text = await analyzeAlertMessages(messages);
-    analysisCache.text = text;
-    analysisCache.takenAt = Date.now();
-    console.log('Analysis cache refreshed');
-  } catch (err) {
-    console.error('Analysis refresh failed:', err);
-  } finally {
-    analysisCache.refreshing = false;
+async function getLiveAnalysis() {
+  const messages = await fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT });
+  const fp = createHash('sha1').update(JSON.stringify(messages)).digest('hex');
+  const cached = analysisCache;
+  if (cached.text && cached.fp === fp && Date.now() - cached.takenAt < ANALYSIS_TTL_MS) {
+    return cached.text;
   }
+  if (analysisInFlight) return analysisInFlight;
+  analysisInFlight = (async () => {
+    try {
+      const text = await analyzeAlertMessages(messages);
+      analysisCache = { text, fp, takenAt: Date.now() };
+      return text;
+    } finally {
+      analysisInFlight = null;
+    }
+  })();
+  return analysisInFlight;
 }
 
-async function getCachedAnalysis() {
-  const age = Date.now() - analysisCache.takenAt;
-  if (analysisCache.text && age < ANALYSIS_TTL_MS) {
-    if (age > ANALYSIS_TTL_MS / 2) refreshAnalysisCache().catch(console.error);
-    return analysisCache.text;
+// ── Region-scoped queries ─────────────────────────────────────────────────────
+// "тривога в києві" → zoomed map of the region; "чому тривога в києві" →
+// Gemini analysis scoped to the region and the user's exact question.
+
+// Region replies follow the same rule as the country map: data is fetched
+// fresh every time, cached renders/answers are reused only while the data
+// fingerprint is unchanged.
+const REGION_MAP_REUSE_MS = 15_000;
+const REGION_WHY_TTL_MS = 90_000;
+const regionMapCache = new Map(); // cacheKey → { buffer, caption, fp, takenAt }
+const regionWhyCache = new Map(); // cacheKey → { text, fp, takenAt }
+
+function pruneCache(map, maxEntries = 40) {
+  while (map.size > maxEntries) map.delete(map.keys().next().value);
+}
+
+async function sendRegionMap(botInstance, chatId, region) {
+  botInstance.sendChatAction(chatId, 'upload_photo').catch(() => {});
+  const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
+  const fp = dataFingerprint({ threats, alerts });
+  const cached = regionMapCache.get(region.cacheKey);
+  if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_MAP_REUSE_MS) {
+    await botInstance.sendPhoto(chatId, cached.buffer, { caption: cached.caption ?? undefined });
+    return;
   }
-  await refreshAnalysisCache();
-  return analysisCache.text;
+  const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
+  regionMapCache.set(region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
+  pruneCache(regionMapCache);
+  await botInstance.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
+}
+
+async function sendRegionWhy(botInstance, chatId, region, userQuery) {
+  botInstance.sendChatAction(chatId, 'typing').catch(() => {});
+  const [{ threats, alerts }, geo, messages] = await Promise.all([
+    getNeptunMapData(),
+    getGeoData(),
+    fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT }).catch(() => []),
+  ]);
+  const fp =
+    dataFingerprint({ threats, alerts }) +
+    ':' +
+    createHash('sha1').update(JSON.stringify(messages)).digest('hex');
+  const cached = regionWhyCache.get(region.cacheKey);
+  if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_WHY_TTL_MS) {
+    await botInstance.sendMessage(chatId, cached.text);
+    return;
+  }
+  const status = buildRegionStatus({ region, threats, alerts, geo });
+  const report = formatRegionReport(status);
+  let text;
+  try {
+    text = await analyzeRegionQuery({
+      userQuery,
+      regionName: region.name,
+      regionReport: report,
+      channelMessages: messages,
+    });
+  } catch (error) {
+    // No GEMINI_API_KEY or Gemini error — the live NEPTUN report still answers
+    // the question factually, so send it instead of failing.
+    console.error('Region Gemini analysis failed, sending NEPTUN report:', error?.message ?? error);
+    text = `${report}\n\n⚠️ AI-аналіз тимчасово недоступний — вище наведено живі дані NEPTUN.`;
+  }
+  regionWhyCache.set(region.cacheKey, { text, fp, takenAt: Date.now() });
+  pruneCache(regionWhyCache);
+  await botInstance.sendMessage(chatId, text);
+}
+
+// ── Flood control ─────────────────────────────────────────────────────────────
+// Reusing a rendered frame bounds render cost, but every triggering message
+// still produces a *send*. Passive triggers fire on any message containing
+// "тривога", so during a raid an active group is one photo per message and a
+// fast route to Telegram's 429s.
+//
+// The window is per (chat, reply kind) rather than per chat: a generic
+// "тривога" must not silently swallow a deliberate "чому тривога в києві"
+// seconds later — different questions deserve answers, it's the repetition
+// that needs damping. Explicit commands (/map) are exempt: silently swallowing
+// a command reads as a broken bot.
+
+export const CHAT_COOLDOWN_MS = 20_000;
+const lastReplyAt = new Map(); // "chatId:kind" → epoch ms
+
+export function isOnCooldown(key, now = Date.now(), cooldownMs = CHAT_COOLDOWN_MS) {
+  const last = lastReplyAt.get(key) ?? 0;
+  if (now - last < cooldownMs) return true;
+  lastReplyAt.delete(key); // re-insert so eviction order stays least-recent-first
+  lastReplyAt.set(key, now);
+  pruneCache(lastReplyAt, 500);
+  return false;
 }
 
 // ── Bot ───────────────────────────────────────────────────────────────────────
@@ -310,7 +399,7 @@ if (token) {
     if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
       bot.sendChatAction(chatId, 'typing').catch(() => {});
       try {
-        const analysis = await getCachedAnalysis();
+        const analysis = await getLiveAnalysis();
         await bot.sendMessage(chatId, analysis ?? 'Не вдалося отримати аналіз.');
       } catch (error) {
         console.error('Failed to send analysis:', error);
@@ -355,4 +444,48 @@ if (token) {
       await bot.sendMessage(chatId, 'Не вдалося побудувати мапу загроз. Спробуй пізніше.');
     }
   });
+
+  // ── Process-level resilience ────────────────────────────────────────────────
+
+  // Long-poll failures (network blips, 409 from a second instance, Telegram
+  // 5xx) are emitted here; unhandled they surface as bare stack traces.
+  bot.on('polling_error', (err) => {
+    console.error('[telegram] Polling error:', err?.code ?? '', err?.message ?? err);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('[process] Unhandled rejection:', reason);
+  });
+
+  // Graceful shutdown. docker-compose already grants a 20 s stop_grace_period
+  // and runs tini as PID 1 — this is the piece that actually uses them, so a
+  // deploy stops polling cleanly and doesn't leave Chromium behind.
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] ${signal} received — stopping…`);
+
+    const timer = setTimeout(() => {
+      console.error('[shutdown] Timed out after 15 s — forcing exit');
+      process.exit(1);
+    }, 15_000);
+    timer.unref();
+
+    try {
+      if (typeof bot.stopPolling === 'function') {
+        await bot.stopPolling({ cancel: true });
+      }
+    } catch (err) {
+      console.error('[shutdown] stopPolling failed:', err?.message ?? err);
+    }
+
+    stopStream();
+    await closeBrowser();
+    console.log('[shutdown] Done');
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

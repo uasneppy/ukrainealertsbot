@@ -80,8 +80,23 @@ describe('channelMessages utilities', () => {
 
       const messages = await fetchLatestChannelMessages({ limit: 2, fetchFn: mockFetch, url: 'https://example.com' });
 
-      expect(mockFetch).toHaveBeenCalledWith('https://example.com');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://example.com',
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
       expect(messages).toHaveLength(2);
+    });
+
+    it('aborts the request once the timeout elapses', async () => {
+      // Never-settling fetch that only rejects when its signal fires — the
+      // exact shape of a half-open connection to t.me.
+      const mockFetch = vi.fn((_url, { signal }) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason));
+      }));
+
+      await expect(
+        fetchLatestChannelMessages({ fetchFn: mockFetch, url: 'https://example.com', timeoutMs: 20 })
+      ).rejects.toThrow('timed out after 20 ms');
     });
 
     it('fails when fetch returns a non-ok response', async () => {

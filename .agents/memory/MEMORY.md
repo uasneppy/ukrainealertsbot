@@ -1,0 +1,4 @@
+- [Puppeteer Chromium on Replit & Docker](puppeteer-chromium-env.md) — npm-bundled & @sparticuz Chromium fail on NixOS/slim; use system chromium; emoji in headless-rendered PNGs = tofu, use inline SVG.
+- [npm "Exit handler never called!" in Docker](npm-ci-docker-crash.md) — intermittent `npm ci` crash is host-side (RAM/disk/cache), not a code/lock bug; reproduce in a clean base image first.
+- [Replit → off-host Docker portability](replit-docker-offhost-portability.md) — lockfile pins to package-firewall.replit.local; build with `--network=host`; verify node_modules is really in the image (don't trust "added N packages").
+- [Ukrainian region matching](ukrainian-region-matching.md) — city vs oblast tie-break for shared stems (донецьк…); JS regex `\b` never matches Cyrillic word edges — use lookarounds.
