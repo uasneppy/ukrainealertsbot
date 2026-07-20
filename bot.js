@@ -23,6 +23,7 @@ import {
   MAX_PER_CHAT,
 } from './neptun/subscriptions.js';
 import { createAlertWatcher, formatAlertNotification } from './neptun/alertWatcher.js';
+import { createSender } from './telegramSender.js';
 
 dotenv.config();
 
@@ -457,20 +458,28 @@ if (token && !isTestEnv) {
   // ── Alert watcher ───────────────────────────────────────────────────────────
   // Only ever reasons about fresh stream state: returning null here is what
   // stops a dead socket from being read as "відбій" for every subscriber.
+  // Fan-out goes through a paced queue: one alert can mean a message to every
+  // subscribed chat at once, and a burst past Telegram's ~30/s ceiling comes
+  // back as 429s — dropping exactly the messages nobody knows to ask for again.
+  const notificationSender = createSender({
+    send: (chatId, text) => bot.sendMessage(chatId, text),
+    // A chat that blocked or deleted the bot would otherwise be retried on
+    // every alert forever.
+    onDeadChat: (chatId) => {
+      const { removed } = unsubscribe(chatId);
+      if (removed) console.log(`[alert-watcher] dropped ${removed} subscription(s) for ${chatId}`);
+    },
+  });
+
   const alertWatcher = createAlertWatcher({
     getSnapshot: () =>
       (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS ? getState() : null),
     getGeo: getGeoData,
-    notify: async ({ region, chatIds, active, status }) => {
+    // Enqueue and return: the tick must not sit waiting on a fan-out that is
+    // paced over seconds, or ticks would overlap during a nationwide alert.
+    notify: ({ region, chatIds, active, status }) => {
       const text = formatAlertNotification({ region, active, status });
-      for (const chatId of chatIds) {
-        try {
-          await bot.sendMessage(chatId, text);
-        } catch (err) {
-          // Blocked bot / deleted chat — log and keep going for the others.
-          console.error(`[alert-watcher] send to ${chatId} failed:`, err?.message ?? err);
-        }
-      }
+      for (const chatId of chatIds) notificationSender.sendTo(chatId, text);
     },
   });
 
@@ -695,6 +704,9 @@ if (token && !isTestEnv) {
 
     alertWatcher.stop();
     stopStream();
+    // Deliver whatever is still queued — an alert notification abandoned
+    // mid-fan-out is one nobody will ever be told about.
+    await notificationSender.drain();
     // Let any queued subscription write land before the process goes away.
     await flushSubscriptions();
     await closeBrowser();

@@ -39,6 +39,7 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/alertWatcher.js` | Polls region alert state, emits alert/all-clear transitions |
 | `neptun/threatIcons.js`, `defaultIcons.js`, `threatMeta.js` | Marker icons and per-type metadata |
 | `fetchWithTimeout.js` | Every outbound HTTP call goes through this |
+| `telegramSender.js` | Paced, retrying queue for unprompted fan-out (alert notifications) |
 
 ## Conventions that matter here
 
@@ -59,6 +60,11 @@ show that they were weighed.
 
 **Everything outbound needs a deadline.** Use `fetchWithTimeout`. A bare `fetch`
 against a half-open connection never settles and can wedge a whole code path.
+
+**Unprompted messages go through `telegramSender`.** Replying to a user is one
+message; announcing a raid is one per subscribed chat at once. Anything that
+fans out must be paced and retried — nobody re-asks for a notification they
+never knew was coming, so a swallowed 429 is a lost warning.
 
 **Ukrainian text is user-facing.** Region names are stored in the nominative;
 don't interpolate them into sentences that need another case ("тривога в
