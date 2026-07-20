@@ -6,12 +6,23 @@ import chromium from '@sparticuz/chromium';
 import dotenv from 'dotenv';
 
 import { fetchLatestChannelMessages, formatChannelMessages } from './channelMessages.js';
-import { analyzeAlertMessages } from './geminiAnalysis.js';
-import { getOrLaunchBrowser } from './neptun/browser.js';
+import { analyzeAlertMessages, analyzeRegionQuery } from './geminiAnalysis.js';
+import { parseRegionQuery, resolveRegion } from './neptun/regionResolver.js';
+import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js';
+import { getOrLaunchBrowser, closeBrowser } from './neptun/browser.js';
 import { renderNeptunMap } from './neptun/mapRenderer.js';
 import { fetchSnapshot } from './neptun/neptunApi.js';
-import { startStream, getState, hasSnapshot } from './neptun/neptunStream.js';
+import { startStream, stopStream, getState, hasSnapshot, streamAgeMs } from './neptun/neptunStream.js';
 import { getGeoData } from './neptun/fetchGeo.js';
+import {
+  loadSubscriptions,
+  flushSubscriptions,
+  subscribe,
+  unsubscribe,
+  listSubscriptions,
+  MAX_PER_CHAT,
+} from './neptun/subscriptions.js';
+import { createAlertWatcher, formatAlertNotification } from './neptun/alertWatcher.js';
 
 dotenv.config();
 
@@ -209,50 +220,81 @@ export async function handleChannelMessageRequest({
 
 // ── NEPTUN map render — shared by /map and тривога ────────────────────────────
 
+// How fresh the WebSocket state must be to be trusted. Beyond this age the
+// stream is treated as stale (half-open socket, reconnect in progress) and the
+// data comes from a one-off REST fetch, so replies always reflect the live map.
+const STREAM_FRESH_MS = 60_000;
+
 /**
- * Renders the NEPTUN map using live WebSocket state if available,
- * falling back to a one-off REST fetch if the stream hasn't connected yet.
+ * Returns the current NEPTUN state, always favouring live data:
+ * fresh WebSocket state → REST fetch → last known stream state (last resort).
  */
 async function getNeptunMapData() {
-  if (hasSnapshot()) {
+  if (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS) {
     return getState();
   }
-  // Stream not ready yet — fall back to REST
-  return fetchSnapshot();
-}
-
-// Cache for the rendered NEPTUN map (60 s TTL).
-const NEPTUN_MAP_TTL_MS = 60_000;
-let neptunMapCache = { buffer: null, caption: null, takenAt: 0, refreshing: false };
-
-async function refreshNeptunMapCache() {
-  if (neptunMapCache.refreshing) return;
-  neptunMapCache.refreshing = true;
   try {
-    const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
-    const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
-    neptunMapCache.buffer = buffer;
-    neptunMapCache.caption = caption;
-    neptunMapCache.takenAt = Date.now();
-    console.log('[neptun] Map cache refreshed');
+    return await fetchSnapshot();
   } catch (err) {
-    console.error('[neptun] Map cache refresh failed:', err);
-  } finally {
-    neptunMapCache.refreshing = false;
+    if (hasSnapshot()) {
+      console.warn('[neptun] REST fetch failed, using last stream state:', err?.message ?? err);
+      return getState();
+    }
+    throw err;
   }
 }
 
-async function getCachedNeptunMap() {
-  const age = Date.now() - neptunMapCache.takenAt;
-  if (neptunMapCache.buffer && age < NEPTUN_MAP_TTL_MS) {
-    if (age > NEPTUN_MAP_TTL_MS / 2) refreshNeptunMapCache().catch(console.error);
-    return neptunMapCache;
-  }
-  await refreshNeptunMapCache();
-  return neptunMapCache;
+const jsonCompare = (a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b));
+
+/**
+ * Stable fingerprint of the data that ends up on a rendered map. Two calls
+ * with the same threats + alerts produce the same hash, so a cached image may
+ * be reused ONLY while the underlying data is truly unchanged.
+ */
+export function dataFingerprint({ threats = [], alerts = {} } = {}) {
+  const stable = {
+    t: [...threats].sort((a, b) => String(a?.id).localeCompare(String(b?.id))),
+    a: {
+      raions: [...(alerts.raions ?? [])].sort(jsonCompare),
+      oblasts: [...(alerts.oblasts ?? [])].sort(jsonCompare),
+    },
+  };
+  return createHash('sha1').update(JSON.stringify(stable)).digest('hex');
 }
 
-// ── Gemini analysis cache ─────────────────────────────────────────────────────
+// ── Live map rendering ────────────────────────────────────────────────────────
+// The map is ALWAYS rendered from the current data. A rendered frame is reused
+// only while the fingerprint of the live data still matches (nothing changed),
+// and even then no longer than MAP_REUSE_MS — spam protection that can never
+// serve an outdated picture.
+const MAP_REUSE_MS = 15_000;
+
+let neptunMapCache = { buffer: null, caption: null, fp: null, takenAt: 0 };
+let neptunMapRenderInFlight = null;
+
+async function getLiveNeptunMap() {
+  const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
+  const fp = dataFingerprint({ threats, alerts });
+  const cached = neptunMapCache;
+  if (cached.buffer && cached.fp === fp && Date.now() - cached.takenAt < MAP_REUSE_MS) {
+    return cached;
+  }
+  if (neptunMapRenderInFlight) return neptunMapRenderInFlight; // coalesce concurrent asks
+  neptunMapRenderInFlight = (async () => {
+    try {
+      const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
+      neptunMapCache = { buffer, caption, fp, takenAt: Date.now() };
+      return neptunMapCache;
+    } finally {
+      neptunMapRenderInFlight = null;
+    }
+  })();
+  return neptunMapRenderInFlight;
+}
+
+// ── Gemini analysis — reused only while the channel feed is unchanged ────────
+// The channel feed is fetched fresh on every request; the Gemini answer is
+// reused only when the fetched messages are identical to the analysed ones.
 
 const ANALYSIS_TTL_MS = 120_000;
 let analysisCache = { text: null, fp: null, takenAt: 0 };
@@ -294,6 +336,17 @@ function pruneCache(map, maxEntries = 40) {
   while (map.size > maxEntries) map.delete(map.keys().next().value);
 }
 
+/**
+ * Writes to an insertion-ordered cache, refreshing the key's position first.
+ * Map.set on an existing key keeps its original slot, so without the delete
+ * the most-requested region is evicted on the same schedule as a cold one.
+ */
+function setCacheEntry(map, key, value, maxEntries = 40) {
+  map.delete(key);
+  map.set(key, value);
+  pruneCache(map, maxEntries);
+}
+
 async function sendRegionMap(botInstance, chatId, region) {
   botInstance.sendChatAction(chatId, 'upload_photo').catch(() => {});
   const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
@@ -304,8 +357,7 @@ async function sendRegionMap(botInstance, chatId, region) {
     return;
   }
   const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
-  regionMapCache.set(region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
-  pruneCache(regionMapCache);
+  setCacheEntry(regionMapCache, region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
   await botInstance.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
 }
 
@@ -341,8 +393,7 @@ async function sendRegionWhy(botInstance, chatId, region, userQuery) {
     console.error('Region Gemini analysis failed, sending NEPTUN report:', error?.message ?? error);
     text = `${report}\n\n⚠️ AI-аналіз тимчасово недоступний — вище наведено живі дані NEPTUN.`;
   }
-  regionWhyCache.set(region.cacheKey, { text, fp, takenAt: Date.now() });
-  pruneCache(regionWhyCache);
+  setCacheEntry(regionWhyCache, region.cacheKey, { text, fp, takenAt: Date.now() });
   await botInstance.sendMessage(chatId, text);
 }
 
@@ -364,28 +415,77 @@ const lastReplyAt = new Map(); // "chatId:kind" → epoch ms
 export function isOnCooldown(key, now = Date.now(), cooldownMs = CHAT_COOLDOWN_MS) {
   const last = lastReplyAt.get(key) ?? 0;
   if (now - last < cooldownMs) return true;
-  lastReplyAt.delete(key); // re-insert so eviction order stays least-recent-first
-  lastReplyAt.set(key, now);
-  pruneCache(lastReplyAt, 500);
+  setCacheEntry(lastReplyAt, key, now, 500);
   return false;
+}
+
+// ── Subscription replies ──────────────────────────────────────────────────────
+// Text builders kept separate from the handlers so they can be unit-tested.
+
+export function formatSubscribeReply(result, query) {
+  if (result.ok) {
+    return `✅ Підписано на сповіщення: ${result.region.name}\nНадсилатиму тривогу та відбій.`;
+  }
+  switch (result.reason) {
+    case 'duplicate':
+      return `ℹ️ Підписка на ${result.region.name} вже активна.`;
+    case 'limit':
+      return `⚠️ Досягнуто ліміт підписок (${MAX_PER_CHAT}). Спочатку відпишись від зайвого: /unsubscribe`;
+    default:
+      return `❓ Не вдалося розпізнати регіон «${query}».\nСпробуй: /subscribe київ або /subscribe харківщина`;
+  }
+}
+
+export function formatSubscriptionList(subs) {
+  if (!subs.length) {
+    return 'Підписок немає.\nДодати: /subscribe <регіон>, напр. /subscribe київщина';
+  }
+  const lines = subs.map((sub) => `• ${sub.name}`);
+  return `🔔 Активні підписки (${subs.length}):\n${lines.join('\n')}\n\nВідписатися: /unsubscribe <регіон> або /unsubscribe all`;
 }
 
 // ── Bot ───────────────────────────────────────────────────────────────────────
 
-if (token) {
+// `!isTestEnv` matters: tests import the helpers above, and a real BOT_TOKEN in
+// a local .env would otherwise start long-polling (and a browser) mid-suite.
+if (token && !isTestEnv) {
   const bot = new TelegramBot(token, { polling: true });
 
-  // Pre-warm on startup: browser, geo cache, NEPTUN stream, map cache, analysis cache
+  // Pre-warm on startup: browser, geo cache, NEPTUN stream, first render.
+  // Warm-ups only prime the browser/Gemini path — every user request still
+  // fetches live data and re-renders whenever that data has changed.
+  // ── Alert watcher ───────────────────────────────────────────────────────────
+  // Only ever reasons about fresh stream state: returning null here is what
+  // stops a dead socket from being read as "відбій" for every subscriber.
+  const alertWatcher = createAlertWatcher({
+    getSnapshot: () =>
+      (hasSnapshot() && streamAgeMs() < STREAM_FRESH_MS ? getState() : null),
+    getGeo: getGeoData,
+    notify: async ({ region, chatIds, active, status }) => {
+      const text = formatAlertNotification({ region, active, status });
+      for (const chatId of chatIds) {
+        try {
+          await bot.sendMessage(chatId, text);
+        } catch (err) {
+          // Blocked bot / deleted chat — log and keep going for the others.
+          console.error(`[alert-watcher] send to ${chatId} failed:`, err?.message ?? err);
+        }
+      }
+    },
+  });
+
   (async () => {
     try {
       await getOrLaunchBrowser();
       startStream();
-      await Promise.all([
-        getGeoData(),
-        refreshAnalysisCache(),
-      ]);
-      // First map render (can take a moment — background)
-      refreshNeptunMapCache().catch(console.error);
+      await Promise.all([getGeoData(), loadSubscriptions()]);
+      alertWatcher.start();
+      getLiveNeptunMap().catch((err) =>
+        console.error('[startup] Map warm-up failed:', err?.message ?? err)
+      );
+      getLiveAnalysis().catch((err) =>
+        console.error('[startup] Analysis warm-up failed:', err?.message ?? err)
+      );
     } catch (err) {
       console.error('[startup] Pre-warm error:', err);
     }
@@ -394,6 +494,36 @@ if (token) {
   bot.on('message', async (msg) => {
     const text = msg.text?.toLowerCase() ?? '';
     const chatId = msg.chat.id;
+
+    // Commands (/map …) are handled by their own onText handlers — skipping
+    // them here prevents double replies for command texts containing triggers.
+    if (text.startsWith('/')) return;
+
+    // ── Region-scoped: "тривога в києві", "чому тривога в київській області" ──
+    const regionQuery = parseRegionQuery(text);
+    const regionMatch = regionQuery ? resolveRegion(regionQuery.regionText) : null;
+    const focusRegion = regionMatch && regionMatch.kind !== 'country' ? regionMatch : null;
+
+    // Which branch below would fire — computed up front so ordinary chatter
+    // never consumes a cooldown slot, and so the slot is scoped to the kind of
+    // reply (and, for region queries, to the region actually asked about).
+    let replyKind = null;
+    if (focusRegion && regionQuery.why) replyKind = `why:${focusRegion.cacheKey}`;
+    else if (text.includes(CHANNEL_MESSAGE_TRIGGER)) replyKind = 'why';
+    else if (focusRegion) replyKind = `map:${focusRegion.cacheKey}`;
+    else if (text.includes('тривога')) replyKind = 'map';
+
+    if (!replyKind || isOnCooldown(`${chatId}:${replyKind}`)) return;
+
+    if (focusRegion && regionQuery.why) {
+      try {
+        await sendRegionWhy(bot, chatId, focusRegion, msg.text ?? '');
+      } catch (error) {
+        console.error('Failed to send region analysis:', error);
+        await bot.sendMessage(chatId, 'Не вдалося отримати аналіз по регіону.');
+      }
+      return;
+    }
 
     // ── "чому тривога" — channel messages + Gemini analysis ──
     if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
@@ -413,11 +543,22 @@ if (token) {
       return;
     }
 
+    // ── Region map: "тривога в <місті/області>" ──
+    if (focusRegion) {
+      try {
+        await sendRegionMap(bot, chatId, focusRegion);
+      } catch (error) {
+        console.error('Failed to send region map:', error);
+        await bot.sendMessage(chatId, 'Не вдалося побудувати мапу регіону.');
+      }
+      return;
+    }
+
     // ── "тривога" — NEPTUN live map ──
     if (text.includes('тривога')) {
       bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
       try {
-        const { buffer, caption } = await getCachedNeptunMap();
+        const { buffer, caption } = await getLiveNeptunMap();
         if (buffer) {
           await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
         } else {
@@ -431,9 +572,22 @@ if (token) {
     }
   });
 
-  // ── /map command — on-demand REST fetch ──────────────────────────────────────
-  bot.onText(/^\/map/, async (msg) => {
+  // ── /map command — on-demand REST fetch; "/map київ" renders a region ───────
+  bot.onText(/^\/map(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
+    const regionArg = match?.[1]?.trim();
+    if (regionArg) {
+      const region = resolveRegion(regionArg);
+      if (region && region.kind !== 'country') {
+        try {
+          await sendRegionMap(bot, chatId, region);
+        } catch (error) {
+          console.error('Failed to send NEPTUN region map (/map):', error);
+          await bot.sendMessage(chatId, 'Не вдалося побудувати мапу регіону. Спробуй пізніше.');
+        }
+        return;
+      }
+    }
     bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
     try {
       const [{ threats, alerts }, geo] = await Promise.all([fetchSnapshot(), getGeoData()]);
@@ -442,6 +596,65 @@ if (token) {
     } catch (error) {
       console.error('Failed to send NEPTUN map (/map):', error);
       await bot.sendMessage(chatId, 'Не вдалося побудувати мапу загроз. Спробуй пізніше.');
+    }
+  });
+
+  // ── Subscription commands ───────────────────────────────────────────────────
+
+  bot.onText(/^\/subscribe(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const query = match?.[1]?.trim();
+    if (!query) {
+      await bot.sendMessage(
+        chatId,
+        'Вкажи регіон: /subscribe київ, /subscribe харківщина\nПоточні підписки: /subscriptions'
+      );
+      return;
+    }
+    try {
+      const result = subscribe(chatId, query);
+      await bot.sendMessage(chatId, formatSubscribeReply(result, query));
+    } catch (error) {
+      console.error('Failed to subscribe:', error);
+      await bot.sendMessage(chatId, 'Не вдалося оформити підписку. Спробуй пізніше.');
+    }
+  });
+
+  bot.onText(/^\/unsubscribe(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const arg = match?.[1]?.trim();
+    try {
+      if (!arg || arg.toLowerCase() === 'all' || arg.toLowerCase() === 'всі') {
+        const { removed } = unsubscribe(chatId);
+        await bot.sendMessage(
+          chatId,
+          removed ? `✅ Скасовано підписок: ${removed}` : 'Підписок не було.'
+        );
+        return;
+      }
+      const region = resolveRegion(arg);
+      if (!region || region.kind === 'country') {
+        await bot.sendMessage(chatId, `❓ Не вдалося розпізнати регіон «${arg}».`);
+        return;
+      }
+      const { removed } = unsubscribe(chatId, region.cacheKey);
+      await bot.sendMessage(
+        chatId,
+        removed ? `✅ Підписку скасовано: ${region.name}` : `Підписки на ${region.name} не було.`
+      );
+    } catch (error) {
+      console.error('Failed to unsubscribe:', error);
+      await bot.sendMessage(chatId, 'Не вдалося скасувати підписку. Спробуй пізніше.');
+    }
+  });
+
+  bot.onText(/^\/subscriptions(?:@\S+)?$/, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      await bot.sendMessage(chatId, formatSubscriptionList(listSubscriptions(chatId)));
+    } catch (error) {
+      console.error('Failed to list subscriptions:', error);
+      await bot.sendMessage(chatId, 'Не вдалося отримати список підписок.');
     }
   });
 
@@ -480,7 +693,10 @@ if (token) {
       console.error('[shutdown] stopPolling failed:', err?.message ?? err);
     }
 
+    alertWatcher.stop();
     stopStream();
+    // Let any queued subscription write land before the process goes away.
+    await flushSubscriptions();
     await closeBrowser();
     console.log('[shutdown] Done');
     process.exit(0);

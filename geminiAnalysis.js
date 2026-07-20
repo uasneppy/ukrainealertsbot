@@ -2,10 +2,6 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const GEMINI_MODEL = 'gemini-3.5-flash';
 
-// Channels whose messages are fetched and analysed together.
-// Add or remove public Telegram channel usernames here.
-export const ALERT_CHANNELS = ['kpszsu'];
-
 /**
  * Takes an array of plain-text channel messages and asks Gemini to identify
  * which cities / regions are at risk and why.

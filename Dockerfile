@@ -40,8 +40,9 @@ RUN npm ci --omit=dev --no-audit --no-fund
 COPY . .
 
 # ── Run as the non-root `node` user shipped with the base image ───────────────
-# The GeoJSON cache is written at runtime, so the app dir must be user-writable.
-RUN mkdir -p /app/neptun/geo && chown -R node:node /app
+# The GeoJSON cache and the subscription store are written at runtime, so both
+# dirs must exist and be user-writable before the volumes are mounted over them.
+RUN mkdir -p /app/neptun/geo /app/data && chown -R node:node /app
 USER node
 
 # This bot is a polling worker — it exposes no inbound port.
