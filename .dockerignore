@@ -33,3 +33,4 @@ scripts
 Dockerfile
 .dockerignore
 docker-compose.yml
+data

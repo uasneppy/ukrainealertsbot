@@ -103,6 +103,39 @@ function getLeafletAssets() {
 const PAGE_W = 1280;
 const PAGE_H = 800;
 
+// ── Render concurrency ────────────────────────────────────────────────────────
+// Every render opens a page on the shared Chromium, and a page holding a full
+// raion-level GeoJSON is not cheap. Unbounded concurrency (a busy group, or
+// several regions asked for at once) can push the container past the 2G cap in
+// docker-compose and take the bot down. Queue instead: a render that waits
+// 200 ms is invisible to the user, an OOM-killed container is not.
+
+const MAX_CONCURRENT_RENDERS = Math.max(1, Number(process.env.MAX_CONCURRENT_RENDERS) || 2);
+
+let _activeRenders = 0;
+const _renderQueue = [];
+
+function acquireRenderSlot() {
+  if (_activeRenders < MAX_CONCURRENT_RENDERS) {
+    _activeRenders += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => _renderQueue.push(resolve));
+}
+
+function releaseRenderSlot() {
+  const next = _renderQueue.shift();
+  // Hand the slot straight to the next waiter rather than decrementing and
+  // letting it re-check — that would let a newcomer barge in ahead of it.
+  if (next) next();
+  else _activeRenders = Math.max(0, _activeRenders - 1);
+}
+
+/** Introspection for tests and diagnostics. */
+export function renderQueueStats() {
+  return { active: _activeRenders, queued: _renderQueue.length, limit: MAX_CONCURRENT_RENDERS };
+}
+
 function buildSkeletonHtml({ js, css }) {
   const C = MAP_COLORS;
   return `<!DOCTYPE html>
@@ -454,9 +487,11 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
   }) + ' Kyiv';
 
   const [browser, leaflet] = await Promise.all([getOrLaunchBrowser(), getLeafletAssets()]);
-  const page = await browser.newPage();
 
+  await acquireRenderSlot();
+  let page;
   try {
+    page = await browser.newPage();
     await page.setViewport({ width: PAGE_W, height: PAGE_H, deviceScaleFactor: 1 });
     await page.setContent(buildSkeletonHtml(leaflet), { waitUntil: 'load', timeout: 20_000 });
 
@@ -516,7 +551,8 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
 
     return { buffer, caption };
   } finally {
-    await page.close().catch(() => {});
+    if (page) await page.close().catch(() => {});
+    releaseRenderSlot();
   }
 }
 
