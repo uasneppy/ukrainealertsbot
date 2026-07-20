@@ -1,5 +1,7 @@
 # Air Raid Alerts Telegram Bot
 
+[![CI](https://github.com/uasneppy/ukrainealertsbot/actions/workflows/ci.yml/badge.svg)](https://github.com/uasneppy/ukrainealertsbot/actions/workflows/ci.yml)
+
 Telegram-бот, який показує актуальну карту повітряних загроз в Україні: відповідає мапою на слово **«тривога»**, будує наближену мапу окремого регіону, пояснює причину тривоги за допомогою AI та надсилає сповіщення про тривогу й відбій за підпискою.
 
 Дані — з живого потоку **NEPTUN** (`neptun.in.ua`): WebSocket для оновлень у реальному часі та REST як резерв. Мапа не є скріншотом чужого сайту — вона рендериться власноруч у headless Chromium (Puppeteer + Leaflet), тому вигляд, підписи й масштаб контролюються повністю.

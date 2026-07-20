@@ -49,8 +49,9 @@ export function createAlertWatcher({
     const regions = listRegions();
     if (!regions.length) return { skipped: 'no-subscribers', announced: [] };
 
-    // null means "not fresh enough to reason about" — see rule 1.
-    const snapshot = getSnapshot();
+    // null means "nothing trustworthy to reason about" — see rule 1. Awaited
+    // because the authoritative source is the API, not in-memory stream state.
+    const snapshot = await getSnapshot();
     if (!snapshot) return { skipped: 'stale', announced: [] };
 
     const geo = await getGeo();

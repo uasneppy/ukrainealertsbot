@@ -34,3 +34,4 @@ Dockerfile
 .dockerignore
 docker-compose.yml
 data
+.github
