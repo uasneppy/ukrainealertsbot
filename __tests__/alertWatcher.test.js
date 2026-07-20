@@ -252,3 +252,108 @@ describe('formatAlertNotification', () => {
     expect(text).toBe('🟢 Відбій тривоги — Київська область');
   });
 });
+
+describe('state across restarts', () => {
+  const makeRestartWatcher = ({ initialStates, snapshot, staleStateMs }) => {
+    const notify = vi.fn();
+    const onStateChange = vi.fn();
+    const clock = 10_000_000;
+    const watcher = createAlertWatcher({
+      getSnapshot: () => snapshot,
+      getGeo: async () => GEO,
+      notify,
+      onStateChange,
+      initialStates,
+      staleStateMs,
+      listRegions: () => [{ region: KYIV_OBLAST, chatIds: ['1'] }],
+      now: () => clock,
+    });
+    return { watcher, notify, onStateChange, clock };
+  };
+
+  it('announces an alert that started while the bot was down', async () => {
+    // The gap this closes: a deploy mid-raid used to swallow the notification
+    // entirely, leaving subscribers waiting for a push that never came.
+    const { watcher, notify } = makeRestartWatcher({
+      initialStates: { [KYIV_OBLAST.cacheKey]: { confirmed: false, at: 10_000_000 - 60_000 } },
+      snapshot: { threats: [], alerts: alertsFor('київська') },
+    });
+
+    const result = await watcher.tick();
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(result.announced[0]).toMatchObject({ active: true, missedWhileDown: true });
+  });
+
+  it('announces an all-clear that happened while the bot was down', async () => {
+    const { watcher, notify } = makeRestartWatcher({
+      initialStates: { [KYIV_OBLAST.cacheKey]: { confirmed: true, at: 10_000_000 - 60_000 } },
+      snapshot: { threats: [], alerts: alertsFor() },
+    });
+
+    await watcher.tick();
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toMatchObject({ active: false });
+  });
+
+  it('stays silent when nothing changed while the bot was down', async () => {
+    const { watcher, notify } = makeRestartWatcher({
+      initialStates: { [KYIV_OBLAST.cacheKey]: { confirmed: true, at: 10_000_000 - 60_000 } },
+      snapshot: { threats: [], alerts: alertsFor('київська') },
+    });
+
+    await watcher.tick();
+
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('ignores state too old to be news', async () => {
+    // After a long outage the transitions people missed are history. Firing a
+    // burst of them on boot is noise, not warning.
+    const { watcher, notify } = makeRestartWatcher({
+      initialStates: { [KYIV_OBLAST.cacheKey]: { confirmed: false, at: 0 } },
+      snapshot: { threats: [], alerts: alertsFor('київська') },
+      staleStateMs: 60_000,
+    });
+
+    await watcher.tick();
+
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('seeds silently with no remembered state, and records it', async () => {
+    const { watcher, notify, onStateChange } = makeRestartWatcher({
+      initialStates: {},
+      snapshot: { threats: [], alerts: alertsFor('київська') },
+    });
+
+    await watcher.tick();
+
+    expect(notify).not.toHaveBeenCalled();
+    expect(onStateChange).toHaveBeenCalledWith(KYIV_OBLAST.cacheKey, true, expect.any(Number));
+  });
+
+  it('records every confirmed transition so the next boot can reconcile', async () => {
+    const notify = vi.fn();
+    const onStateChange = vi.fn();
+    let clock = 0;
+    const box = { snapshot: { threats: [], alerts: alertsFor() } };
+    const watcher = createAlertWatcher({
+      getSnapshot: () => box.snapshot,
+      getGeo: async () => GEO,
+      notify,
+      onStateChange,
+      initialStates: {},
+      listRegions: () => [{ region: KYIV_OBLAST, chatIds: ['1'] }],
+      now: () => clock,
+    });
+
+    await watcher.tick(); // seed: quiet
+    box.snapshot = { threats: [], alerts: alertsFor('київська') };
+    clock += 1_000;
+    await watcher.tick(); // alert announced
+
+    expect(onStateChange).toHaveBeenLastCalledWith(KYIV_OBLAST.cacheKey, true, expect.any(Number));
+  });
+});

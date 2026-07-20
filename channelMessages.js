@@ -102,7 +102,18 @@ export async function fetchLatestChannelMessages({
   }
 
   const safeLimit = sanitizeLimit(limit);
-  const response = await fetchWithTimeout(url, { fetchFn, timeoutMs });
+  // t.me serves different markup to clients it doesn't recognise, and a bare
+  // fetch has no User-Agent at all. Without this the scrape can start returning
+  // nothing while the request still looks successful.
+  const response = await fetchWithTimeout(url, {
+    fetchFn,
+    timeoutMs,
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (compatible; UkraineAlertsBot/1.0; +https://github.com/uasneppy/ukrainealertsbot)',
+      'Accept-Language': 'uk,en;q=0.8',
+    },
+  });
 
   if (!response || typeof response.text !== 'function') {
     throw new Error('Invalid response returned from fetch');
@@ -113,7 +124,15 @@ export async function fetchLatestChannelMessages({
   }
 
   const html = await response.text();
-  return extractMessageContents(html, safeLimit);
+  const messages = extractMessageContents(html, safeLimit);
+  if (!messages.length && html.length > 0) {
+    // A 200 with no parseable messages means the markup changed under us. The
+    // caller can only fall back silently, so at least say so in the logs.
+    console.warn(
+      `[channelMessages] ${url} returned ${html.length} bytes but no messages — markup may have changed`
+    );
+  }
+  return messages;
 }
 
 export function formatChannelMessages(messages, channelLabel = '@kpszsu') {

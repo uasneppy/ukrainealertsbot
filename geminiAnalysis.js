@@ -1,6 +1,57 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 const GEMINI_MODEL = 'gemini-3.5-flash';
+
+/**
+ * Both callers fall back gracefully when Gemini fails, which is right for the
+ * user and terrible for the operator: a key that stopped working, or a model
+ * name that 404s, looks exactly like "the AI had nothing to add" forever.
+ * /status reads this so the degradation is visible.
+ */
+const _health = { lastOkAt: 0, lastFailAt: 0, lastError: '', calls: 0, failures: 0 };
+
+export function getAiHealth() {
+  return {
+    configured: Boolean(process.env.GEMINI_API_KEY),
+    model: GEMINI_MODEL,
+    ..._health,
+  };
+}
+
+function recordOk() {
+  _health.calls += 1;
+  _health.lastOkAt = Date.now();
+}
+
+/**
+ * One call path for both prompts, so health tracking can't drift between them.
+ * The @google/genai client returns the text directly rather than through a
+ * response wrapper — the older @google/generative-ai shape was
+ * `result.response.text()`.
+ */
+async function generate(apiKey, prompt) {
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const result = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+    });
+    const text = typeof result?.text === 'string' ? result.text : String(result?.text ?? '');
+    if (!text.trim()) throw new Error('Gemini returned an empty response');
+    recordOk();
+    return text.trim();
+  } catch (err) {
+    recordFailure(err);
+    throw err;
+  }
+}
+
+function recordFailure(err) {
+  _health.calls += 1;
+  _health.failures += 1;
+  _health.lastFailAt = Date.now();
+  _health.lastError = String(err?.message ?? err).slice(0, 200);
+}
 
 /**
  * Takes an array of plain-text channel messages and asks Gemini to identify
@@ -14,9 +65,6 @@ export async function analyzeAlertMessages(messages) {
   if (!apiKey) throw new Error('GEMINI_API_KEY is required');
 
   if (!messages.length) return 'Немає повідомлень для аналізу.';
-
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
   const messagesText = messages.map((m, i) => `${i + 1}. ${m}`).join('\n\n');
 
@@ -41,8 +89,7 @@ ${messagesText}
 
 Якщо якихось даних немає — пропусти відповідний розділ. Відповідай українською, коротко і по суті.`;
 
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim();
+  return generate(apiKey, prompt);
 }
 
 /**
@@ -82,9 +129,6 @@ export async function analyzeRegionQuery({ userQuery, regionName, regionReport, 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY is required');
 
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
   const prompt = buildRegionPrompt({ userQuery, regionName, regionReport, channelMessages });
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim();
+  return generate(apiKey, prompt);
 }

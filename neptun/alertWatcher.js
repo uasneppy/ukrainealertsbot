@@ -18,7 +18,7 @@
  * Dependencies are injected so the whole thing is testable without a socket.
  */
 
-import { buildRegionStatus } from './regionContext.js';
+import { buildRegionStatus, fmtKyivTime } from './regionContext.js';
 import { subscribedRegions } from './subscriptions.js';
 
 /** Alert start: announced as soon as it is observed. */
@@ -26,6 +26,13 @@ export const DEFAULT_CONFIRM_ON_MS = 0;
 /** All-clear: must hold this long, so a flapping feed can't sound the retreat. */
 export const DEFAULT_CONFIRM_OFF_MS = 60_000;
 export const DEFAULT_INTERVAL_MS = 20_000;
+
+/**
+ * How old persisted state may be and still be worth reconciling against. After
+ * a long outage the transitions people missed are history, not news, and a
+ * burst of them on boot is noise at best.
+ */
+export const DEFAULT_STALE_STATE_MS = 6 * 60 * 60 * 1000;
 
 export function createAlertWatcher({
   getSnapshot,
@@ -35,6 +42,10 @@ export function createAlertWatcher({
   confirmOnMs = DEFAULT_CONFIRM_ON_MS,
   confirmOffMs = DEFAULT_CONFIRM_OFF_MS,
   intervalMs = DEFAULT_INTERVAL_MS,
+  // What we last told subscribers, from before the restart.
+  initialStates = null,
+  onStateChange = null,
+  staleStateMs = DEFAULT_STALE_STATE_MS,
   now = () => Date.now(),
 } = {}) {
   if (typeof getSnapshot !== 'function') throw new Error('getSnapshot is required');
@@ -69,8 +80,26 @@ export function createAlertWatcher({
 
       let state = states.get(region.cacheKey);
       if (!state) {
-        // Rule 2: seed silently.
+        const remembered = initialStates ? initialStates[region.cacheKey] : null;
+        const usable =
+          remembered &&
+          typeof remembered.confirmed === 'boolean' &&
+          t - (remembered.at ?? 0) <= staleStateMs;
+
+        if (usable && remembered.confirmed !== active) {
+          // The state changed while we were down — a deploy during a raid. This
+          // is the one case where the first tick must speak: a subscriber is
+          // waiting for a push that already silently didn't happen.
+          states.set(region.cacheKey, { confirmed: active, candidate: active, candidateSince: t });
+          onStateChange?.(region.cacheKey, active, t);
+          announced.push({ region, chatIds, active, status, missedWhileDown: true });
+          continue;
+        }
+
+        // Rule 2 otherwise: seed silently, so a restart doesn't re-announce
+        // raids that have been running for hours.
         states.set(region.cacheKey, { confirmed: active, candidate: active, candidateSince: t });
+        if (!usable) onStateChange?.(region.cacheKey, active, t);
         continue;
       }
 
@@ -83,6 +112,7 @@ export function createAlertWatcher({
       const requiredHoldMs = state.candidate ? confirmOnMs : confirmOffMs;
       if (state.candidate !== state.confirmed && t - state.candidateSince >= requiredHoldMs) {
         state.confirmed = state.candidate;
+        onStateChange?.(region.cacheKey, state.confirmed, t);
         announced.push({ region, chatIds, active: state.confirmed, status });
       }
     }
@@ -132,7 +162,11 @@ export function formatAlertNotification({ region, active, status }) {
     return `🟢 Відбій тривоги — ${region.name}`;
   }
 
-  const lines = [`🔴 Повітряна тривога — ${region.name}`];
+  // The "since" time matters most when the alert started while the bot was
+  // down: without it the message reads as breaking news for something that may
+  // have begun twenty minutes ago.
+  const since = fmtKyivTime(status?.alertSince);
+  const lines = [`🔴 Повітряна тривога — ${region.name}${since ? ` (з ${since})` : ''}`];
 
   const threats = status?.threatsIn ?? [];
   if (threats.length) {

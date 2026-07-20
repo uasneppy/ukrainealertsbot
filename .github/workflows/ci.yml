@@ -1,13 +1,13 @@
 name: CI
 
 # Runs on every PR and on pushes to the long-lived branches. The suite is the
-# thing that catches a bad merge resolution: when `main` and `v3` were merged
+# thing that catches a bad merge resolution: when two branches were merged
 # with the incoming side discarded, three test files could no longer import the
 # symbols they test — but nothing was running them, so it merged anyway.
 on:
   pull_request:
   push:
-    branches: [main, v3]
+    branches: [main]
 
 jobs:
   test:

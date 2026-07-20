@@ -170,6 +170,33 @@ export function computeCityFrameKm({ radiusKm = 60, threatsIn = [], threatsNear 
   return Math.min(frameKm, 95);
 }
 
+/** Per-type counts, names, emoji and colours for the legend and captions. */
+export function computeTypeMeta(threats = []) {
+  const typeMeta = {};
+  for (const t of threats) {
+    const type = String(t?.type ?? 'unknown').toLowerCase();
+    if (!typeMeta[type]) {
+      typeMeta[type] = {
+        count: 0,
+        name: THREAT_NAMES_UA[type] ?? (t?.title || t?.name || type),
+        emoji: THREAT_EMOJI[type] ?? THREAT_EMOJI.unknown,
+        color: THREAT_COLORS[type] ?? THREAT_COLORS.unknown,
+      };
+    }
+    typeMeta[type].count += 1;
+  }
+  return typeMeta;
+}
+
+/**
+ * The national caption as plain text, without rendering anything. Used as the
+ * answer when a render fails: the facts are known even when Chromium isn't
+ * available to draw them.
+ */
+export function buildNationalReport({ threats = [], alerts = {}, date = new Date() } = {}) {
+  return buildCaption(computeTypeMeta(threats), alerts, date);
+}
+
 function buildSkeletonHtml({ js, css }) {
   const C = MAP_COLORS;
   return `<!DOCTYPE html>
@@ -571,19 +598,7 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
     : threats;
 
   // Per-type metadata for markers, legend and caption.
-  const typeMeta = {};
-  for (const t of metaSource) {
-    const type = String(t?.type ?? 'unknown').toLowerCase();
-    if (!typeMeta[type]) {
-      typeMeta[type] = {
-        count: 0,
-        name: THREAT_NAMES_UA[type] ?? (t?.title || t?.name || type),
-        emoji: THREAT_EMOJI[type] ?? THREAT_EMOJI.unknown,
-        color: THREAT_COLORS[type] ?? THREAT_COLORS.unknown,
-      };
-    }
-    typeMeta[type].count += 1;
-  }
+  const typeMeta = computeTypeMeta(metaSource);
 
   // Marker icons: built-in SVG badges (font-independent), overridden by any
   // user files from the icons/ folder — re-read every render, so icons can be

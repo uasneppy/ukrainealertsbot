@@ -24,6 +24,14 @@ const MAX_BACKOFF_MS = 30_000;
 const WATCHDOG_INTERVAL_MS = 15_000;
 const STALE_AFTER_MS = 90_000;
 
+/**
+ * A threat whose `remove` message we missed would otherwise sit on the map for
+ * ever. The cut-off is deliberately generous: this state is only served when
+ * the REST API is unreachable, and in that situation showing a threat that has
+ * actually passed is a far smaller harm than hiding one that hasn't.
+ */
+const THREAT_TTL_MS = 60 * 60 * 1000;
+
 /** In-memory live state */
 const _threats = new Map(); // id → threat object
 const _alerts = { raions: [], oblasts: [] };
@@ -38,9 +46,13 @@ let _watchdogTimer = null;
 let _reconnectTimer = null;
 
 /** Returns a point-in-time snapshot of the live state. */
-export function getState() {
+export function getState(now = Date.now()) {
+  const fresh = [..._threats.values()].filter((t) => {
+    const updated = Date.parse(t?.updatedAt ?? '');
+    return !Number.isFinite(updated) || now - updated <= THREAT_TTL_MS;
+  });
   return {
-    threats: [..._threats.values()],
+    threats: fresh,
     alerts: { raions: [..._alerts.raions], oblasts: [..._alerts.oblasts] },
   };
 }

@@ -249,3 +249,20 @@ export const __testables = {
   OBLAST_DEFS,
   CITY_DEFS,
 };
+
+/**
+ * Reverses a descriptor's cacheKey back into the descriptor.
+ *
+ * Inline-keyboard callbacks can only carry 64 bytes, so a button ships the
+ * cacheKey and the handler resolves it here rather than round-tripping the
+ * user's original phrasing.
+ */
+export function regionFromCacheKey(cacheKey) {
+  const key = String(cacheKey ?? '');
+  for (const def of ALL_DEFS) {
+    if (def.kind === 'country') continue;
+    const region = toRegion(def);
+    if (region.cacheKey === key) return region;
+  }
+  return null;
+}
