@@ -39,6 +39,10 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/regionContext.js` | Per-region threat/alert analysis, report and caption builders |
 | `neptun/subscriptions.js` | Persisted per-chat region subscriptions |
 | `neptun/alertWatcher.js` | Polls region alert state, emits alert/all-clear transitions |
+| `neptun/alertState.js` | Last announced state per region, so a restart doesn't swallow transitions |
+| `neptun/messageRouter.js` | Pure: message text → which reply it asks for |
+| `neptun/keyboards.js` | Inline buttons and their 64-byte callback payloads |
+| `neptun/statusReport.js` | /status — makes the deliberately-silent degradations visible |
 | `neptun/threatIcons.js`, `defaultIcons.js`, `threatMeta.js` | Marker icons and per-type metadata |
 | `fetchWithTimeout.js` | Every outbound HTTP call goes through this |
 | `telegramSender.js` | Paced, retrying queue for unprompted fan-out (alert notifications) |
@@ -83,6 +87,11 @@ views (`mock`, a city, an oblast) before believing it looks right.
 **Ukrainian text is user-facing.** Region names are stored in the nominative;
 don't interpolate them into sentences that need another case ("тривога в
 Київська область" is wrong). Use a command form or the resolver's own phrasing.
+
+**Degrade, don't apologise.** A render can fail while the answer is perfectly
+well known — `formatRegionReport` and `buildNationalReport` say it in text.
+Sending "не вдалося" when the facts are in hand throws away the only thing the
+user actually asked for.
 
 **Guard test-env side effects.** Tests import `bot.js` for its helpers. Anything
 that starts polling, a browser, or a timer must stay behind the

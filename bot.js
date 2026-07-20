@@ -9,8 +9,9 @@ import dotenv from 'dotenv';
 
 import { fetchLatestChannelMessages, formatChannelMessages } from './channelMessages.js';
 import { analyzeAlertMessages, analyzeRegionQuery, getAiHealth } from './geminiAnalysis.js';
-import { resolveRegion } from './neptun/regionResolver.js';
+import { resolveRegion, regionFromCacheKey } from './neptun/regionResolver.js';
 import { routeMessage } from './neptun/messageRouter.js';
+import { mapKeyboard, decodeCallback, CALLBACK_REFRESH, CALLBACK_SUBSCRIBE, CALLBACK_UNSUBSCRIBE } from './neptun/keyboards.js';
 import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js';
 import { getOrLaunchBrowser, closeBrowser } from './neptun/browser.js';
 import { renderNeptunMap, buildNationalReport, renderQueueStats } from './neptun/mapRenderer.js';
@@ -347,19 +348,30 @@ function setCacheEntry(map, key, value, maxEntries = 40) {
   pruneCache(map, maxEntries);
 }
 
+function regionMarkup(chatId, region) {
+  const subscribed = listSubscriptions(chatId).some((s) => s.cacheKey === region.cacheKey);
+  return mapKeyboard({ cacheKey: region.cacheKey, subscribed });
+}
+
 async function sendRegionMap(botInstance, chatId, region) {
   botInstance.sendChatAction(chatId, 'upload_photo').catch(() => {});
   const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
   const fp = dataFingerprint({ threats, alerts });
   const cached = regionMapCache.get(region.cacheKey);
   if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_MAP_REUSE_MS) {
-    await botInstance.sendPhoto(chatId, cached.buffer, { caption: cached.caption ?? undefined });
+    await botInstance.sendPhoto(chatId, cached.buffer, {
+      caption: cached.caption ?? undefined,
+      reply_markup: regionMarkup(chatId, region),
+    });
     return;
   }
   try {
     const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
     setCacheEntry(regionMapCache, region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
-    await botInstance.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
+    await botInstance.sendPhoto(chatId, buffer, {
+      caption: caption ?? undefined,
+      reply_markup: regionMarkup(chatId, region),
+    });
   } catch (error) {
     // Chromium died, the render timed out, the queue is wedged — the answer is
     // still known, it just can't be drawn. Sending "не вдалося" here throws away
@@ -580,7 +592,10 @@ if (token && !isTestEnv) {
       try {
         const { buffer, caption } = await getLiveNeptunMap();
         if (buffer) {
-          await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
+          await bot.sendPhoto(chatId, buffer, {
+            caption: caption ?? undefined,
+            reply_markup: mapKeyboard({}),
+          });
         } else {
           await bot.sendMessage(chatId, 'Не вдалося отримати мапу загроз.');
         }
@@ -721,6 +736,72 @@ if (token && !isTestEnv) {
     } catch (error) {
       console.error('Failed to list subscriptions:', error);
       await bot.sendMessage(chatId, 'Не вдалося отримати список підписок.');
+    }
+  });
+
+  // ── Inline button callbacks ─────────────────────────────────────────────────
+
+  bot.on('callback_query', async (query) => {
+    const chatId = query?.message?.chat?.id;
+    const messageId = query?.message?.message_id;
+    const { action, cacheKey } = decodeCallback(query?.data);
+    // Telegram shows a spinner on the button until this is answered.
+    const ack = (text) => bot.answerCallbackQuery(query.id, text ? { text } : undefined).catch(() => {});
+
+    if (!chatId || !action) {
+      await ack();
+      return;
+    }
+
+    const region = cacheKey ? regionFromCacheKey(cacheKey) : null;
+
+    try {
+      if (action === CALLBACK_SUBSCRIBE || action === CALLBACK_UNSUBSCRIBE) {
+        if (!region) {
+          await ack('Регіон не розпізнано');
+          return;
+        }
+        if (action === CALLBACK_SUBSCRIBE) {
+          const result = subscribe(chatId, region.name);
+          await ack(result.ok ? `🔔 Підписано: ${region.name}` : 'Підписка вже активна');
+        } else {
+          const { removed } = unsubscribe(chatId, region.cacheKey);
+          await ack(removed ? `🔕 Підписку скасовано` : 'Підписки не було');
+        }
+        // Flip the button to match the new state.
+        await bot
+          .editMessageReplyMarkup(regionMarkup(chatId, region) ?? { inline_keyboard: [] }, {
+            chat_id: chatId,
+            message_id: messageId,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      if (action === CALLBACK_REFRESH) {
+        await ack('Оновлюю…');
+        const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
+        const { buffer, caption } = region
+          ? await renderNeptunMap({ threats, alerts, geo, focus: region })
+          : await renderNeptunMap({ threats, alerts, geo });
+        const markup = region ? regionMarkup(chatId, region) : mapKeyboard({});
+
+        // Editing keeps the chat from filling with near-identical maps. If the
+        // API shape or the message disagrees, fall back to a new message rather
+        // than leaving the user with nothing.
+        try {
+          await bot.editMessageMedia(
+            { type: 'photo', media: buffer, caption: caption ?? undefined },
+            { chat_id: chatId, message_id: messageId, reply_markup: markup }
+          );
+        } catch (err) {
+          console.error('[callback] editMessageMedia failed, resending:', err?.message ?? err);
+          await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined, reply_markup: markup });
+        }
+      }
+    } catch (error) {
+      console.error('Callback handling failed:', error?.message ?? error);
+      await ack('Не вдалося виконати дію');
     }
   });
 
