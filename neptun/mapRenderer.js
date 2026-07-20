@@ -50,6 +50,40 @@ export const CITY_LABELS = [
   { name: 'Маріуполь', lat: 47.0971, lon: 37.5434 },
 ];
 
+// ── Map palette ────────────────────────────────────────────────────────────
+// Single source of truth for every non-marker color on the map. Marker/badge
+// colors per threat type live in THREAT_COLORS (threatMeta.js) — kept
+// separate since those are keyed by type, not by map layer.
+//
+// Alert severity is a two-step ladder (amber → red) instead of one pink wash,
+// so a district-level alert and a whole-oblast alert read as different
+// severities at a glance instead of blurring into the same muddy tone.
+export const MAP_COLORS = {
+  bg:                 '#080c14',  // page / space beyond the country outline
+  oblastFill:         '#141e30',  // unalerted oblast fill
+  oblastBorder:       '#3d5b82',  // unalerted oblast border
+  raionGrid:          '#22314a',  // thin raion grid lines (texture only)
+  countryOutline:     '#7fb2e8',  // Ukraine border
+
+  raionAlertFill:     '#f5a623',  // district-level alert — amber "watch"
+  raionAlertBorder:   '#f5a623',
+  oblastAlertFill:    '#e0303f',  // whole-oblast alert — red "active"
+  oblastAlertBorder:  '#ff5468',
+
+  cityDot:            '#eaf2fb',
+  cityLabel:          '#f2f7fd',
+  threatLabel:        '#f4f8fc',  // marker text label (focused/region view)
+
+  panelBg:            'rgba(8,13,22,0.92)',
+  panelBorder:        '#243854',
+  legendLabel:        '#8ab4d4',
+  legendText:         '#cdd9e5',
+
+  focusOutline:        '#eaf2fb', // dashed oblast-of-interest outline
+  focusCityRing:       '#ffffff',
+  titleDot:            '#ff4444',
+};
+
 // ── Leaflet assets (vendored, inlined once per process) ──────────────────────
 
 let _leafletAssetsPromise = null;
@@ -70,6 +104,7 @@ const PAGE_W = 1280;
 const PAGE_H = 800;
 
 function buildSkeletonHtml({ js, css }) {
+  const C = MAP_COLORS;
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -77,19 +112,19 @@ function buildSkeletonHtml({ js, css }) {
 <style>${css}</style>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: ${PAGE_W}px; height: ${PAGE_H}px; overflow: hidden; background: #0b1220; }
-  #map { width: ${PAGE_W}px; height: ${PAGE_H}px; background: #0b1220; }
-  .leaflet-container { background: #0b1220 !important; }
+  html, body { width: ${PAGE_W}px; height: ${PAGE_H}px; overflow: hidden; background: ${C.bg}; }
+  #map { width: ${PAGE_W}px; height: ${PAGE_H}px; background: ${C.bg}; }
+  .leaflet-container { background: ${C.bg} !important; }
 
   .city-marker { pointer-events: none; }
   .city-dot {
     position: absolute; left: 0; top: 0; width: 8px; height: 8px; border-radius: 50%;
-    background: #eaf2fb; border: 1.5px solid rgba(5,10,20,0.9);
+    background: ${C.cityDot}; border: 1.5px solid rgba(5,10,20,0.9);
     box-shadow: 0 0 5px rgba(0,0,0,0.9);
   }
   .city-name {
     position: absolute; left: 12px; top: -8px;
-    font: 700 15px/1 sans-serif; color: #f2f7fd; white-space: nowrap;
+    font: 700 15px/1 sans-serif; color: ${C.cityLabel}; white-space: nowrap;
     text-shadow: 0 1px 3px #000, 0 0 7px rgba(0,0,0,0.95);
     letter-spacing: 0.02em;
   }
@@ -101,34 +136,34 @@ function buildSkeletonHtml({ js, css }) {
   .threat-img { filter: drop-shadow(0 2px 5px rgba(0,0,0,0.85)); }
   .threat-wrap { display: flex; flex-direction: column; align-items: center; }
   .threat-label {
-    margin-top: 2px; font: 700 11px/1.15 sans-serif; color: #ffe9c9;
+    margin-top: 2px; font: 700 11px/1.15 sans-serif; color: ${C.threatLabel};
     white-space: nowrap; text-shadow: 0 1px 2px #000, 0 0 6px #000;
   }
 
   .legend {
     position: fixed; bottom: 18px; right: 18px;
-    background: rgba(10,16,28,0.92); border: 1px solid #2a4060;
+    background: ${C.panelBg}; border: 1px solid ${C.panelBorder};
     border-radius: 8px; padding: 10px 14px; z-index: 1000; font-family: sans-serif;
   }
-  .legend-title { color: #8ab4d4; font-size: 11px; font-weight: bold;
+  .legend-title { color: ${C.legendLabel}; font-size: 11px; font-weight: bold;
     text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
   .legend-item { display: flex; align-items: center; gap: 7px;
-    color: #cdd9e5; font-size: 12px; margin: 3px 0; }
+    color: ${C.legendText}; font-size: 12px; margin: 3px 0; }
   .legend-alert { display: flex; align-items: center; gap: 7px;
-    color: #ffb3b3; font-size: 12px; margin: 4px 0 0; }
+    color: ${C.legendText}; font-size: 12px; margin: 4px 0 0; }
   .alert-swatch { width: 14px; height: 10px; border-radius: 2px; flex-shrink: 0; }
-  .alert-swatch-raion  { background: rgba(255,138,138,0.55); border: 1px solid #ffabab; }
-  .alert-swatch-oblast { background: rgba(214,26,26,0.70);  border: 1px solid #ff5c5c; }
+  .alert-swatch-raion  { background: ${C.raionAlertFill}66; border: 1px solid ${C.raionAlertBorder}; }
+  .alert-swatch-oblast { background: ${C.oblastAlertFill}99; border: 1px solid ${C.oblastAlertBorder}; }
 
   .title-bar {
     position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
-    background: rgba(10,16,28,0.88); border: 1px solid #2a4060;
+    background: ${C.panelBg}; border: 1px solid ${C.panelBorder};
     border-radius: 8px; padding: 6px 18px; z-index: 1000;
-    font-family: sans-serif; color: #8ab4d4; font-size: 13px;
+    font-family: sans-serif; color: ${C.legendLabel}; font-size: 13px;
     display: flex; align-items: center; gap: 10px;
   }
-  .title-dot { width: 8px; height: 8px; border-radius: 50%; background: #ff4444;
-    box-shadow: 0 0 6px #ff4444; }
+  .title-dot { width: 8px; height: 8px; border-radius: 50%; background: ${C.titleDot};
+    box-shadow: 0 0 6px ${C.titleDot}; }
 </style>
 <script>${js}</script>
 </head>
@@ -145,8 +180,9 @@ function _renderOnPage(payload) {
   const {
     ukraine, oblasts, raions,
     threats, alertedOblastKeys, alertedRaionKeys,
-    typeMeta, iconDataUrls, cities, timestamp, focusView,
+    typeMeta, iconDataUrls, cities, timestamp, focusView, colors,
   } = payload;
+  const C = colors;
 
   // Mirrors normalizeAlertKey() on the Node side (keep in sync).
   const norm = (v) => String(v ?? '')
@@ -175,34 +211,36 @@ function _renderOnPage(payload) {
     keyboard: false,
   });
 
-  // 1. Oblast fills — whole-oblast alert → strong red
+  // 1. Oblast fills — whole-oblast alert → strong red "active" tone
   L.geoJSON(oblasts, {
     style: (f) => (oblastSet.has(featKey(f))
-      ? { stroke: false, fillColor: '#d61a1a', fillOpacity: 0.62 }
-      : { stroke: false, fillColor: '#1c2f4a', fillOpacity: 0.94 }),
+      ? { stroke: false, fillColor: C.oblastAlertFill, fillOpacity: 0.60 }
+      : { stroke: false, fillColor: C.oblastFill, fillOpacity: 0.94 }),
   }).addTo(map);
 
   // 2. Raion grid — thin borders for texture
   L.geoJSON(raions, {
-    style: () => ({ color: '#2b4a6f', weight: 0.55, opacity: 0.85, fill: false }),
+    style: () => ({ color: C.raionGrid, weight: 0.55, opacity: 0.85, fill: false }),
   }).addTo(map);
 
-  // 3. Alerted raions — pale red fill (individual districts)
+  // 3. Alerted raions — amber "watch" fill (individual districts, lower
+  //    severity than a whole-oblast alert, so a distinct hue rather than a
+  //    paler version of the same red)
   L.geoJSON(raions, {
     filter: (f) => raionSet.has(featKey(f)),
-    style: () => ({ color: '#ffabab', weight: 1.1, opacity: 0.9, fillColor: '#ff8a8a', fillOpacity: 0.52 }),
+    style: () => ({ color: C.raionAlertBorder, weight: 1.1, opacity: 0.9, fillColor: C.raionAlertFill, fillOpacity: 0.30 }),
   }).addTo(map);
 
   // 4. Oblast borders above the fills
   L.geoJSON(oblasts, {
     style: (f) => (oblastSet.has(featKey(f))
-      ? { color: '#ff5c5c', weight: 1.8, opacity: 1, fill: false }
-      : { color: '#47709c', weight: 1.15, opacity: 1, fill: false }),
+      ? { color: C.oblastAlertBorder, weight: 1.8, opacity: 1, fill: false }
+      : { color: C.oblastBorder, weight: 1.15, opacity: 1, fill: false }),
   }).addTo(map);
 
   // 5. Country outline
   L.geoJSON(ukraine, {
-    style: () => ({ color: '#84b3e0', weight: 2.4, opacity: 1, fill: false }),
+    style: () => ({ color: C.countryOutline, weight: 2.4, opacity: 1, fill: false }),
   }).addTo(map);
 
   // Fit the frame: whole country, a single oblast, or a city with surroundings
@@ -213,7 +251,7 @@ function _renderOnPage(payload) {
   if (focusFeature) {
     map.fitBounds(L.geoJSON(focusFeature).getBounds(), { padding: [26, 26] });
     L.geoJSON(focusFeature, {
-      style: () => ({ color: '#eaf2fb', weight: 2.6, opacity: 0.95, fill: false, dashArray: '6 4' }),
+      style: () => ({ color: C.focusOutline, weight: 2.6, opacity: 0.95, fill: false, dashArray: '6 4' }),
     }).addTo(map);
   } else if (focusView && focusView.kind === 'city') {
     // frameKm is the adaptive half-extent (tight around the city + its
@@ -226,7 +264,7 @@ function _renderOnPage(payload) {
       { padding: [8, 8] }
     );
     L.circleMarker([focusView.lat, focusView.lon], {
-      radius: 11, color: '#ffffff', weight: 2, opacity: 0.95, fill: false, dashArray: '2 3',
+      radius: 11, color: C.focusCityRing, weight: 2, opacity: 0.95, fill: false, dashArray: '2 3',
     }).addTo(map);
   } else {
     map.fitBounds(L.geoJSON(ukraine).getBounds(), { padding: [12, 12] });
@@ -468,6 +506,7 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
       cities: CITY_LABELS,
       timestamp,
       focusView,
+      colors: MAP_COLORS,
     });
 
     await page.waitForFunction(() => window.__mapReady === true, { timeout: 5_000 });

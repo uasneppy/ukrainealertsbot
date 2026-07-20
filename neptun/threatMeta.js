@@ -5,13 +5,13 @@
  */
 
 export const THREAT_COLORS = {
-  missile:   '#ff4444',
-  ballistic: '#cc0000',
-  uav:       '#ff8c00',
+  missile:   '#ff4d4d',
+  ballistic: '#b3122c', // deep crimson — was near-identical to missile red
+  uav:       '#ff8c42',
   fpv:       '#ff4fa3',
-  recon:     '#ffd700',
-  kab:       '#bb00ff',
-  mig31k:    '#ff6600',
+  recon:     '#22c3b0', // teal — gold used to blend into the new amber alert fill
+  kab:       '#a855f7',
+  mig31k:    '#ff5f2e',
   unknown:   '#9aa7b5',
 };
 
