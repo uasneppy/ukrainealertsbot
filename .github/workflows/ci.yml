@@ -1,0 +1,43 @@
+name: CI
+
+# Runs on every PR and on pushes to the long-lived branches. The suite is the
+# thing that catches a bad merge resolution: when `main` and `v3` were merged
+# with the incoming side discarded, three test files could no longer import the
+# symbols they test — but nothing was running them, so it merged anyway.
+on:
+  pull_request:
+  push:
+    branches: [main, v3]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      # The renderer is mocked in tests; downloading Chromium would add minutes
+      # to every run for nothing. The Dockerfile does the same for the image.
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the Dockerfile base image (node:22-slim) and the engine
+          # floors of puppeteer@25 (>=22.12) and @sparticuz/chromium (>=22.17).
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      # Named separately from the suite so this failure mode is unmistakable in
+      # the checks list: bot.js once called stopStream() and closeBrowser()
+      # while importing neither, which only surfaced on SIGTERM — in production.
+      - name: bot.js imports cleanly without starting a bot
+        env:
+          NODE_ENV: test
+        run: node -e "import('./bot.js').then(() => console.log('ok'))"
