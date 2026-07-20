@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 import TelegramBot from 'node-telegram-bot-api';
 import puppeteer from 'puppeteer';
@@ -6,22 +8,26 @@ import chromium from '@sparticuz/chromium';
 import dotenv from 'dotenv';
 
 import { fetchLatestChannelMessages, formatChannelMessages } from './channelMessages.js';
-import { analyzeAlertMessages, analyzeRegionQuery } from './geminiAnalysis.js';
-import { parseRegionQuery, resolveRegion } from './neptun/regionResolver.js';
+import { analyzeAlertMessages, analyzeRegionQuery, getAiHealth } from './geminiAnalysis.js';
+import { resolveRegion } from './neptun/regionResolver.js';
+import { routeMessage } from './neptun/messageRouter.js';
 import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js';
 import { getOrLaunchBrowser, closeBrowser } from './neptun/browser.js';
-import { renderNeptunMap, buildNationalReport } from './neptun/mapRenderer.js';
+import { renderNeptunMap, buildNationalReport, renderQueueStats } from './neptun/mapRenderer.js';
 import { fetchSnapshot } from './neptun/neptunApi.js';
 import { startStream, stopStream, getState, hasSnapshot, streamAgeMs } from './neptun/neptunStream.js';
-import { getGeoData } from './neptun/fetchGeo.js';
+import { getGeoData, geoCacheAgeMs } from './neptun/fetchGeo.js';
 import {
   loadSubscriptions,
   flushSubscriptions,
   subscribe,
   unsubscribe,
   listSubscriptions,
+  subscribedRegions,
+  getSubscriptionsFile,
   MAX_PER_CHAT,
 } from './neptun/subscriptions.js';
+import { formatStatusReport } from './neptun/statusReport.js';
 import { createAlertWatcher, formatAlertNotification } from './neptun/alertWatcher.js';
 import {
   loadAlertState,
@@ -522,30 +528,14 @@ if (token && !isTestEnv) {
   })();
 
   bot.on('message', async (msg) => {
-    const text = msg.text?.toLowerCase() ?? '';
     const chatId = msg.chat.id;
+    const { kind, region: focusRegion, cooldownKey } = routeMessage(msg.text);
 
-    // Commands (/map …) are handled by their own onText handlers — skipping
-    // them here prevents double replies for command texts containing triggers.
-    if (text.startsWith('/')) return;
+    // Ordinary chatter never consumes a cooldown slot; the slot is scoped to
+    // the kind of reply and, for region queries, to the region asked about.
+    if (!kind || isOnCooldown(`${chatId}:${cooldownKey}`)) return;
 
-    // ── Region-scoped: "тривога в києві", "чому тривога в київській області" ──
-    const regionQuery = parseRegionQuery(text);
-    const regionMatch = regionQuery ? resolveRegion(regionQuery.regionText) : null;
-    const focusRegion = regionMatch && regionMatch.kind !== 'country' ? regionMatch : null;
-
-    // Which branch below would fire — computed up front so ordinary chatter
-    // never consumes a cooldown slot, and so the slot is scoped to the kind of
-    // reply (and, for region queries, to the region actually asked about).
-    let replyKind = null;
-    if (focusRegion && regionQuery.why) replyKind = `why:${focusRegion.cacheKey}`;
-    else if (text.includes(CHANNEL_MESSAGE_TRIGGER)) replyKind = 'why';
-    else if (focusRegion) replyKind = `map:${focusRegion.cacheKey}`;
-    else if (text.includes('тривога')) replyKind = 'map';
-
-    if (!replyKind || isOnCooldown(`${chatId}:${replyKind}`)) return;
-
-    if (focusRegion && regionQuery.why) {
+    if (kind === 'region-why') {
       try {
         await sendRegionWhy(bot, chatId, focusRegion, msg.text ?? '');
       } catch (error) {
@@ -556,7 +546,7 @@ if (token && !isTestEnv) {
     }
 
     // ── "чому тривога" — channel messages + Gemini analysis ──
-    if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
+    if (kind === 'channel-why') {
       bot.sendChatAction(chatId, 'typing').catch(() => {});
       try {
         const analysis = await getLiveAnalysis();
@@ -574,7 +564,7 @@ if (token && !isTestEnv) {
     }
 
     // ── Region map: "тривога в <місті/області>" ──
-    if (focusRegion) {
+    if (kind === 'region-map') {
       try {
         await sendRegionMap(bot, chatId, focusRegion);
       } catch (error) {
@@ -585,7 +575,7 @@ if (token && !isTestEnv) {
     }
 
     // ── "тривога" — NEPTUN live map ──
-    if (text.includes('тривога')) {
+    if (kind === 'national-map') {
       bot.sendChatAction(chatId, 'upload_photo').catch(() => {});
       try {
         const { buffer, caption } = await getLiveNeptunMap();
@@ -689,6 +679,41 @@ if (token && !isTestEnv) {
     }
   });
 
+  bot.onText(/^\/status(?:@\S+)?$/, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      // Probe the API for real rather than reporting a cached opinion of it —
+      // "can we answer right now" is the only question worth asking here.
+      let apiOk = false;
+      let apiLatencyMs = 0;
+      let apiError = null;
+      const startedAt = Date.now();
+      try {
+        await fetchSnapshot();
+        apiOk = true;
+        apiLatencyMs = Date.now() - startedAt;
+      } catch (err) {
+        apiError = err?.message ?? String(err);
+      }
+
+      await bot.sendMessage(chatId, formatStatusReport({
+        streamConnected: hasSnapshot(),
+        streamAgeMs: streamAgeMs(),
+        apiOk,
+        apiLatencyMs,
+        apiError,
+        geoAgeMs: await geoCacheAgeMs(),
+        ai: getAiHealth(),
+        renderQueue: renderQueueStats(),
+        subscriptions: listSubscriptions(chatId).length,
+        watchedRegions: subscribedRegions().length,
+      }));
+    } catch (error) {
+      console.error('Failed to send status:', error);
+      await bot.sendMessage(chatId, 'Не вдалося зібрати стан.');
+    }
+  });
+
   bot.onText(/^\/subscriptions(?:@\S+)?$/, async (msg) => {
     const chatId = msg.chat.id;
     try {
@@ -745,6 +770,18 @@ if (token && !isTestEnv) {
     console.log('[shutdown] Done');
     process.exit(0);
   };
+
+  // Liveness beacon for the container healthcheck. A crashed process is caught
+  // by Docker already; this catches the nastier case of a process that is still
+  // "up" while its event loop is wedged and it answers nobody.
+  const heartbeatFile = process.env.HEARTBEAT_FILE
+    || path.join(path.dirname(getSubscriptionsFile()), 'heartbeat');
+  const beat = () => {
+    fs.writeFile(heartbeatFile, String(Date.now()), 'utf8').catch(() => {});
+  };
+  beat();
+  const heartbeatTimer = setInterval(beat, 30_000);
+  heartbeatTimer.unref?.();
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));

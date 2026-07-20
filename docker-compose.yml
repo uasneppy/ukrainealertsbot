@@ -15,6 +15,16 @@ services:
     # Give the bot time to stop Telegram polling + close Chromium cleanly on stop.
     stop_grace_period: 20s
 
+    # A crashed process restarts on its own; this catches the worse case of a
+    # process that is still running while its event loop is wedged, which looks
+    # perfectly healthy from the outside and answers nobody.
+    healthcheck:
+      test: ["CMD-SHELL", "[ $$(( $$(date +%s) - $$(stat -c %Y /app/data/heartbeat) )) -lt 120 ]"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
     # VPS hardening: block privilege escalation inside the container.
     security_opt:
       - no-new-privileges:true

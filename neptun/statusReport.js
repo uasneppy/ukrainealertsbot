@@ -1,0 +1,72 @@
+/**
+ * Operator-facing health summary behind /status.
+ *
+ * Every degradation in this bot is designed to be invisible to users: a dead
+ * Gemini key reads as "the AI had nothing to add", a dead socket reads as a
+ * quiet sky, a wedged render reads as a text answer. That is right for someone
+ * sheltering and useless for whoever has to keep the thing running, so the
+ * facts are collected in one place.
+ */
+
+const ago = (timestamp, now) => {
+  if (!timestamp) return 'ніколи';
+  const seconds = Math.max(0, Math.round((now - timestamp) / 1000));
+  if (seconds < 60) return `${seconds} с тому`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} хв тому`;
+  return `${Math.round(seconds / 3600)} год тому`;
+};
+
+/**
+ * @param {object} facts
+ * @param {boolean} facts.streamConnected
+ * @param {number}  facts.streamAgeMs
+ * @param {number}  facts.geoAgeMs
+ * @param {object}  facts.ai            from getAiHealth()
+ * @param {object}  facts.renderQueue   from renderQueueStats()
+ * @param {number}  facts.subscriptions subscriptions for the asking chat
+ * @param {number}  facts.watchedRegions distinct regions the watcher polls
+ * @param {number}  [facts.now]
+ */
+export function formatStatusReport(facts = {}) {
+  const now = facts.now ?? Date.now();
+  const lines = ['🩺 Стан бота'];
+
+  const streamOk = facts.streamConnected && facts.streamAgeMs < 90_000;
+  lines.push(
+    `${streamOk ? '🟢' : '🔴'} NEPTUN потік: ${
+      Number.isFinite(facts.streamAgeMs)
+        ? `дані ${Math.round(facts.streamAgeMs / 1000)} с тому`
+        : 'немає зʼєднання'
+    }`
+  );
+
+  // The map path reads the API on every request, so this is what actually
+  // decides whether a reply is possible.
+  lines.push(
+    `${facts.apiOk ? '🟢' : '🔴'} NEPTUN API: ${
+      facts.apiOk ? `відповідає (${facts.apiLatencyMs} мс)` : `недоступний — ${facts.apiError ?? '?'}`
+    }`
+  );
+
+  const ai = facts.ai ?? {};
+  if (!ai.configured) {
+    lines.push('⚪ AI-аналіз: вимкнено (немає GEMINI_API_KEY)');
+  } else if (ai.failures && !ai.lastOkAt) {
+    // Every call has failed: the fallback text hides this from users entirely.
+    lines.push(`🔴 AI-аналіз: усі запити з помилкою (${ai.failures}) — ${ai.lastError}`);
+  } else if (ai.lastFailAt > ai.lastOkAt) {
+    lines.push(`🟠 AI-аналіз: остання помилка ${ago(ai.lastFailAt, now)} — ${ai.lastError}`);
+  } else if (ai.lastOkAt) {
+    lines.push(`🟢 AI-аналіз: працює (востаннє ${ago(ai.lastOkAt, now)})`);
+  } else {
+    lines.push('⚪ AI-аналіз: ще не викликався');
+  }
+
+  const q = facts.renderQueue ?? {};
+  lines.push(`🖼 Рендер: ${q.active ?? 0}/${q.limit ?? '?'} активних, у черзі ${q.queued ?? 0}`);
+  lines.push(`🗺 Кеш меж: оновлено ${ago(now - (facts.geoAgeMs ?? 0), now)}`);
+  lines.push(`🔔 Підписки цього чату: ${facts.subscriptions ?? 0}`);
+  lines.push(`👀 Регіонів під наглядом: ${facts.watchedRegions ?? 0}`);
+
+  return lines.join('\n');
+}

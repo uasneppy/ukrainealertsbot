@@ -3,6 +3,34 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 const GEMINI_MODEL = 'gemini-3.5-flash';
 
 /**
+ * Both callers fall back gracefully when Gemini fails, which is right for the
+ * user and terrible for the operator: a key that stopped working, or a model
+ * name that 404s, looks exactly like "the AI had nothing to add" forever.
+ * /status reads this so the degradation is visible.
+ */
+const _health = { lastOkAt: 0, lastFailAt: 0, lastError: '', calls: 0, failures: 0 };
+
+export function getAiHealth() {
+  return {
+    configured: Boolean(process.env.GEMINI_API_KEY),
+    model: GEMINI_MODEL,
+    ..._health,
+  };
+}
+
+function recordOk() {
+  _health.calls += 1;
+  _health.lastOkAt = Date.now();
+}
+
+function recordFailure(err) {
+  _health.calls += 1;
+  _health.failures += 1;
+  _health.lastFailAt = Date.now();
+  _health.lastError = String(err?.message ?? err).slice(0, 200);
+}
+
+/**
  * Takes an array of plain-text channel messages and asks Gemini to identify
  * which cities / regions are at risk and why.
  *
@@ -41,8 +69,14 @@ ${messagesText}
 
 Якщо якихось даних немає — пропусти відповідний розділ. Відповідай українською, коротко і по суті.`;
 
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim();
+  try {
+    const result = await model.generateContent(prompt);
+    recordOk();
+    return result.response.text().trim();
+  } catch (err) {
+    recordFailure(err);
+    throw err;
+  }
 }
 
 /**
@@ -85,6 +119,12 @@ export async function analyzeRegionQuery({ userQuery, regionName, regionReport, 
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
   const prompt = buildRegionPrompt({ userQuery, regionName, regionReport, channelMessages });
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim();
+  try {
+    const result = await model.generateContent(prompt);
+    recordOk();
+    return result.response.text().trim();
+  } catch (err) {
+    recordFailure(err);
+    throw err;
+  }
 }
