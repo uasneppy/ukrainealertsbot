@@ -77,3 +77,59 @@ describe('routeMessage', () => {
     expect(routeMessage('тривога в мордорі')).toMatchObject({ kind: 'national-map' });
   });
 });
+
+describe('routeMessage — bare region triggers (shorter forms)', () => {
+  it('treats a lone region name as a region-map request', () => {
+    for (const [text, name] of [
+      ['київ', 'Київ'],
+      ['києві', 'Київ'],
+      ['харкова', 'Харків'],
+      ['київщина', 'Київська область'],
+      ['київська область', 'Київська область'],
+      ['львівській області', 'Львівська область'],
+      ['ар крим', 'АР Крим'],
+    ]) {
+      const r = routeMessage(text);
+      expect(r.kind, `"${text}"`).toBe('region-map');
+      expect(r.region.name, `"${text}"`).toBe(name);
+    }
+  });
+
+  it('answers "чому <регіон>" as a region-why', () => {
+    const r = routeMessage('чому харків');
+    expect(r.kind).toBe('region-why');
+    expect(r.region.name).toBe('Харків');
+  });
+
+  it('accepts a leading request word: "карта <регіон>"', () => {
+    expect(routeMessage('карта києва')).toMatchObject({ kind: 'region-map' });
+    expect(routeMessage('покажи львів')).toMatchObject({ kind: 'region-map' });
+    expect(routeMessage('мапу харківщини')).toMatchObject({ kind: 'region-map' });
+  });
+
+  it('accepts "тривога <регіон>" without a preposition', () => {
+    const r = routeMessage('тривога київ');
+    expect(r.kind).toBe('region-map');
+    expect(r.region.name).toBe('Київ');
+  });
+
+  it('does NOT fire when a city is merely mentioned in a sentence', () => {
+    // The whole point: no map spam in a group chat.
+    for (const text of ['їду в київ завтра', 'харків тримайся', 'київ найкраще місто', 'я з харкова родом']) {
+      expect(routeMessage(text).kind, `"${text}"`).not.toBe('region-map');
+    }
+  });
+
+  it('keeps ordinary chatter silent', () => {
+    for (const text of ['привіт усім', 'як там справи', 'дякую за інфу']) {
+      expect(routeMessage(text)).toMatchObject({ kind: null });
+    }
+  });
+
+  it('still prefers the explicit forms and national fallback', () => {
+    expect(routeMessage('тривога')).toMatchObject({ kind: 'national-map' });
+    expect(routeMessage('чому тривога')).toMatchObject({ kind: 'channel-why' });
+    expect(routeMessage('тривога в україні')).toMatchObject({ kind: 'national-map' });
+    expect(routeMessage('україна')).toMatchObject({ kind: 'national-map' });
+  });
+});
