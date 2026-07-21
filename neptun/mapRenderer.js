@@ -240,6 +240,10 @@ function buildSkeletonHtml({ js, css }) {
   html, body { width: ${PAGE_W}px; height: ${PAGE_H}px; overflow: hidden; background: ${C.bg}; }
   #map { width: ${PAGE_W}px; height: ${PAGE_H}px; background: ${C.bg}; }
   .leaflet-container { background: ${C.bg} !important; }
+  /* No fade-in: a rendered still must not catch tiles mid-transition (they show
+     as a translucent dark rectangle). A loaded tile is opaque immediately. */
+  .leaflet-tile { transition: none !important; }
+  .leaflet-fade-anim .leaflet-tile { will-change: auto; }
 
   .city-marker { pointer-events: none; }
   .city-dot {
@@ -633,15 +637,25 @@ function _renderOnPage(payload) {
     placedLabels.push(grow(label.getBoundingClientRect(), 2));
   });
 
-  // Without tiles the map is drawn synchronously and is ready now. With tiles,
-  // wait for them to load before signalling ready — but cap the wait, so one
-  // slow or failed tile can't hang the render (we'd rather ship a map with a
-  // gap than no map at all).
+  // Without tiles the map is drawn synchronously and is ready now.
+  //
+  // With tiles it's timing-sensitive: Leaflet loads tiles in waves, and its
+  // 'load' event fires at the end of each wave — screenshotting on the first
+  // one caught a later wave still arriving, showing as a dark rectangle over
+  // the not-yet-painted tiles. So wait until the grid has been quiet for a
+  // beat (no new 'load' for SETTLE_MS), and cap the whole wait so a slow or
+  // unreachable source degrades to a gappy map rather than hanging the render.
+  // (The tile fade-in is also disabled in CSS, so a loaded tile is opaque at
+  // once instead of transitioning through a translucent state.)
   if (baseTiles) {
-    let ready = false;
-    const finish = () => { if (!ready) { ready = true; window.__mapReady = true; } };
-    baseTiles.on('load', finish);
-    setTimeout(finish, 3500);
+    const SETTLE_MS = 500;
+    let settle = null;
+    const arm = () => {
+      if (settle) clearTimeout(settle);
+      settle = setTimeout(() => { window.__mapReady = true; }, SETTLE_MS);
+    };
+    baseTiles.on('load', arm);   // fires per wave, incl. all-errored (fast-fails)
+    setTimeout(() => { window.__mapReady = true; }, 8000); // hard upper bound
   } else {
     window.__mapReady = true;
   }
