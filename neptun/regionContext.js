@@ -311,61 +311,80 @@ const alertLine = (status) => {
   }
 };
 
+// One threat, one line. A single " · " separator throughout — mixing "—",
+// commas and "(…)" is what made these hard to scan on a phone.
 const threatLineIn = (t, { short = false } = {}) => {
   const place = t.locality || t.sourceRegion || '';
-  const course = t.headingWord ? `, курс: ${short ? t.headingShort : t.headingWord}` : '';
-  return `• ${t.emoji} ${t.name}${place ? ` — ${place}` : ''}${course}`;
+  const course = t.headingWord ? `курс ${short ? t.headingShort : t.headingWord}` : '';
+  return `• ${[`${t.emoji} ${t.name}`, place, course].filter(Boolean).join(' · ')}`;
 };
 
 const threatLineNear = (t, { short = false } = {}) => {
   const dir = short ? t.directionShort : t.direction;
-  const place = [t.locality, t.sourceRegion].filter(Boolean).join(', ');
-  const course = t.headingWord ? `, курс: ${short ? t.headingShort : t.headingWord}` : '';
-  return `• ${t.emoji} ${t.name} — ~${t.distanceKm} км ${dir ? `на ${dir}` : ''}${place ? ` (${place})` : ''}${course}`;
+  // Locality alone: the parenthetical oblast doubled the line length and the
+  // map already shows which oblast it's over.
+  const place = t.locality || t.sourceRegion || '';
+  const course = t.headingWord ? `курс ${short ? t.headingShort : t.headingWord}` : '';
+  const distance = `~${t.distanceKm} км${dir ? ` на ${dir}` : ''}`;
+  return `• ${[`${t.emoji} ${t.name}`, distance, course, place].filter(Boolean).join(' · ')}`;
 };
 
-const statusBodyLines = (status, { maxIn = 8, maxNear = 5, short = false } = {}) => {
-  const lines = [alertLine(status)];
+/**
+ * The body as an array of blocks. Each block is a group of lines that belong
+ * together (the alert line, the in-region list, the nearby list); the callers
+ * join blocks with a blank line so the sections breathe.
+ */
+const statusBlocks = (status, { maxIn = 8, maxNear = 5, short = false } = {}) => {
+  const blocks = [alertLine(status)];
 
   if (status.threatsIn.length) {
-    lines.push(`⚠️ Загрози в регіоні (${status.threatsIn.length}):`);
+    const lines = [`⚠️ У регіоні — ${status.threatsIn.length}`];
     status.threatsIn.slice(0, maxIn).forEach((t) => lines.push(threatLineIn(t, { short })));
     if (status.threatsIn.length > maxIn) lines.push(`…та ще ${status.threatsIn.length - maxIn}`);
+    blocks.push(lines.join('\n'));
   }
 
   if (status.threatsNear.length) {
-    lines.push(`📡 Поблизу (${status.threatsNear.length}):`);
+    const lines = [`📡 Поблизу — ${status.threatsNear.length}`];
     status.threatsNear.slice(0, maxNear).forEach((t) => lines.push(threatLineNear(t, { short })));
     if (status.threatsNear.length > maxNear) lines.push(`…та ще ${status.threatsNear.length - maxNear}`);
+    blocks.push(lines.join('\n'));
   }
 
   if (!status.threatsIn.length && !status.threatsNear.length) {
-    lines.push('✅ Загроз у регіоні та поблизу не зафіксовано');
+    blocks.push('✅ Загроз у регіоні та поблизу не зафіксовано');
   }
 
-  return lines;
+  return blocks;
+};
+
+const footerLine = (date) => {
+  const timeStr = date.toLocaleTimeString('uk-UA', {
+    hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kyiv',
+  });
+  return `🕐 ${timeStr} за Києвом · © neptun.in.ua`;
 };
 
 /** Plain-text report — Gemini prompt facts + bot fallback message. */
 export function formatRegionReport(status, opts = {}) {
-  return [`📍 ${status.region.name}`, ...statusBodyLines(status, { maxIn: 10, maxNear: 6, ...opts })].join('\n');
+  return [`📍 ${status.region.name}`, ...statusBlocks(status, { maxIn: 10, maxNear: 6, ...opts })]
+    .join('\n\n');
 }
 
 /** Telegram photo caption for the focused map (kept under the 1024-char limit). */
 export function buildFocusCaption(status, date = new Date()) {
-  const timeStr = date.toLocaleTimeString('uk-UA', {
-    hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kyiv',
-  });
   const header = `🗺 NEPTUN — ${status.region.name}`;
-  const footer = `🕐 ${timeStr} Kyiv  •  © neptun.in.ua`;
+  const footer = footerLine(date);
 
   let maxIn = 7;
   let maxNear = 4;
-  let caption = [header, ...statusBodyLines(status, { maxIn, maxNear, short: true }), footer].join('\n');
+  const build = () =>
+    [header, ...statusBlocks(status, { maxIn, maxNear, short: true }), footer].join('\n\n');
+  let caption = build();
   while (caption.length > 1000 && (maxIn > 1 || maxNear > 0)) {
     if (maxIn > 1) maxIn -= 1;
     if (maxNear > 0) maxNear -= 1;
-    caption = [header, ...statusBodyLines(status, { maxIn, maxNear, short: true }), footer].join('\n');
+    caption = build();
   }
   return caption;
 }

@@ -193,8 +193,21 @@ describe('report and caption builders', () => {
     const report = formatRegionReport(status);
     expect(report).toContain('📍 Тестова область');
     expect(report).toContain('🔴 Тривога — вся область (з 21:05)');
-    expect(report).toContain('БпЛА — Село');
-    expect(report).toContain('курс: захід');
+    expect(report).toContain('БпЛА · Село');
+    expect(report).toContain('курс захід');
+  });
+
+  it('separates sections with a blank line so the caption is scannable', () => {
+    const near = [
+      { id: 'n1', type: 'missile', title: 'Ракета', lat: 51.6, lon: 30.5, locality: 'Далеке', heading: 180 },
+    ];
+    const status = buildRegionStatus({ region: oblastRegion, threats: [...threats, ...near], alerts, geo });
+    const report = formatRegionReport(status);
+
+    // Header, alert, in-region and nearby are separate paragraphs, not a wall.
+    expect(report).toContain('\n\n');
+    expect(report).toMatch(/📍 Тестова область\n\n🔴/);
+    expect(report.split('\n\n').length).toBeGreaterThanOrEqual(3);
   });
 
   it('reports "no alert / no threats" states', () => {
