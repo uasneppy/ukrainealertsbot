@@ -35,3 +35,7 @@ Dockerfile
 docker-compose.yml
 data
 .github
+
+# CasaOS packaging & docs — not needed in the runtime image
+casaos
+docs
