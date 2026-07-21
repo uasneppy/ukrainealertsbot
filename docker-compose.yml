@@ -61,6 +61,9 @@ services:
       - STADIA_API_KEY=${STADIA_API_KEY:-}
       - CITY_TILES_URL=${CITY_TILES_URL:-}
       - CITY_TILES_ATTRIBUTION=${CITY_TILES_ATTRIBUTION:-}
+      # Optional tuning for live per-target notifications (code defaults used if unset).
+      - LIVE_ALERT_TYPES=${LIVE_ALERT_TYPES:-}
+      - LIVE_ALERT_KM=${LIVE_ALERT_KM:-}
 
     volumes:
       # Persist the GeoJSON cache so boundaries aren't re-downloaded on restart.

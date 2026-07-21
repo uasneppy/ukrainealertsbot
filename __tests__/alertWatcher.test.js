@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-import { createAlertWatcher, formatAlertNotification } from '../neptun/alertWatcher.js';
+import { createAlertWatcher, formatAlertNotification, formatThreatNotification } from '../neptun/alertWatcher.js';
 import { resolveRegion } from '../neptun/regionResolver.js';
 
 const KYIV_OBLAST = resolveRegion('київська область');
@@ -355,5 +355,135 @@ describe('state across restarts', () => {
     await watcher.tick(); // alert announced
 
     expect(onStateChange).toHaveBeenLastCalledWith(KYIV_OBLAST.cacheKey, true, expect.any(Number));
+  });
+});
+
+describe('live threat events (missiles / ballistics)', () => {
+  const KYIV = resolveRegion('київ'); // city → status computed from coords, no geo needed
+  const NO_ALERTS = { oblasts: [], raions: [] };
+
+  const missile = (id, lat, lon, extra = {}) =>
+    ({ id, type: 'missile', title: 'Ракета', lat, lon, ...extra });
+
+  function cityWatcher() {
+    const notify = vi.fn();
+    const box = { snapshot: { threats: [], alerts: NO_ALERTS } };
+    let clock = 1_000_000;
+    const watcher = createAlertWatcher({
+      getSnapshot: () => box.snapshot,
+      getGeo: async () => ({}),
+      notify,
+      listRegions: () => [{ region: KYIV, chatIds: ['1'] }],
+      now: () => clock,
+    });
+    return { watcher, notify, box, advance: (ms) => { clock += ms; } };
+  }
+  const threatEvents = (result) => result.announced.filter((a) => a.kind === 'threat');
+
+  it('announces a missile approaching, even before a formal alert', async () => {
+    const { watcher, box } = cityWatcher();
+    await watcher.tick(); // seed empty
+
+    // ~100 km south of Kyiv, heading north → toward the city.
+    box.snapshot = { threats: [missile('m1', 49.546, 30.523, { heading: 0, locality: 'Обухів' })], alerts: NO_ALERTS };
+    const events = threatEvents(await watcher.tick());
+
+    expect(events).toHaveLength(1);
+    expect(events[0].events[0].stage).toBe('near');
+    expect(events[0].events[0].threat.name).toBe('Ракета');
+  });
+
+  it('does NOT announce a missile that is nearby but heading away', async () => {
+    const { watcher, box } = cityWatcher();
+    await watcher.tick();
+
+    box.snapshot = { threats: [missile('m2', 49.546, 30.523, { heading: 180 })], alerts: NO_ALERTS }; // heading south
+    expect(threatEvents(await watcher.tick())).toHaveLength(0);
+  });
+
+  it('announces again when the target enters the region, then stays quiet', async () => {
+    const { watcher, box } = cityWatcher();
+    await watcher.tick();
+
+    box.snapshot = { threats: [missile('m3', 49.546, 30.523, { heading: 0 })], alerts: NO_ALERTS };
+    expect(threatEvents(await watcher.tick())[0].events[0].stage).toBe('near');
+
+    box.snapshot = { threats: [missile('m3', 50.450, 30.523, { heading: 0 })], alerts: NO_ALERTS }; // now overhead
+    expect(threatEvents(await watcher.tick())[0].events[0].stage).toBe('in');
+
+    // Still overhead next tick → no repeat.
+    expect(threatEvents(await watcher.tick())).toHaveLength(0);
+  });
+
+  it('seeds silently — a missile already flying at boot is not re-announced', async () => {
+    const { watcher, box } = cityWatcher();
+    box.snapshot = { threats: [missile('m4', 49.546, 30.523, { heading: 0 })], alerts: NO_ALERTS };
+
+    expect(threatEvents(await watcher.tick())).toHaveLength(0); // first tick = seed
+    // And it's recorded, so it stays quiet afterwards.
+    expect(threatEvents(await watcher.tick())).toHaveLength(0);
+  });
+
+  it('ignores slow types — a drone overhead gets no live alert', async () => {
+    const { watcher, box } = cityWatcher();
+    await watcher.tick();
+
+    box.snapshot = { threats: [{ id: 'd1', type: 'uav', title: 'БпЛА', lat: 50.45, lon: 30.523, heading: 0 }], alerts: NO_ALERTS };
+    expect(threatEvents(await watcher.tick())).toHaveLength(0);
+  });
+
+  it('ignores an approaching missile still beyond the live-alert distance', async () => {
+    const { watcher, box } = cityWatcher();
+    await watcher.tick();
+
+    // ~128 km south — within the "nearby" radius but past the 120 km live gate.
+    box.snapshot = { threats: [missile('m5', 49.293, 30.523, { heading: 0 })], alerts: NO_ALERTS };
+    expect(threatEvents(await watcher.tick())).toHaveLength(0);
+  });
+
+  it('summarises several targets appearing at once into one message', async () => {
+    const { watcher, box } = cityWatcher();
+    await watcher.tick();
+
+    box.snapshot = {
+      threats: [
+        missile('a', 49.55, 30.40, { heading: 0 }),
+        missile('b', 49.55, 30.60, { heading: 0 }),
+        { id: 'c', type: 'ballistic', title: 'Балістика', lat: 49.60, lon: 30.52, heading: 0 },
+      ],
+      alerts: NO_ALERTS,
+    };
+    const events = threatEvents(await watcher.tick());
+    expect(events).toHaveLength(1);          // one message for the region
+    expect(events[0].events.length).toBe(3); // covering three targets
+  });
+});
+
+describe('formatThreatNotification', () => {
+  const region = { name: 'Київ' };
+  const t = (over = {}) => ({ emoji: '🚀', name: 'Ракета', distanceKm: 80, direction: 'пд', headingWord: 'пн', locality: 'Обухів', ...over });
+
+  it('phrases a single approaching target urgently', () => {
+    const text = formatThreatNotification({ region, events: [{ stage: 'near', threat: t() }] });
+    expect(text).toContain('🚀 Ракета — Київ');
+    expect(text).toContain('наближається');
+    expect(text).toContain('80 км');
+    expect(text).toContain('/map Київ');
+  });
+
+  it('marks a target that has entered the region', () => {
+    const text = formatThreatNotification({ region, events: [{ stage: 'in', threat: t() }] });
+    expect(text).toContain('🚨');
+    expect(text).toContain('над Обухів');
+  });
+
+  it('summarises several targets with correct Ukrainian plural', () => {
+    const two = formatThreatNotification({ region, events: [
+      { stage: 'near', threat: t() }, { stage: 'near', threat: t({ name: 'Балістика', emoji: '💥' }) },
+    ] });
+    expect(two).toContain('2 цілі');
+
+    const five = formatThreatNotification({ region, events: Array.from({ length: 5 }, () => ({ stage: 'near', threat: t() })) });
+    expect(five).toContain('5 цілей');
   });
 });
