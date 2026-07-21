@@ -57,6 +57,10 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       # Timezone for log timestamps (defaults to UTC). e.g. TZ=Europe/Kyiv
       - TZ=${TZ:-UTC}
+      # Optional street tiles for the city view (see .env.example). Off unless set.
+      - STADIA_API_KEY=${STADIA_API_KEY:-}
+      - CITY_TILES_URL=${CITY_TILES_URL:-}
+      - CITY_TILES_ATTRIBUTION=${CITY_TILES_ATTRIBUTION:-}
 
     volumes:
       # Persist the GeoJSON cache so boundaries aren't re-downloaded on restart.
