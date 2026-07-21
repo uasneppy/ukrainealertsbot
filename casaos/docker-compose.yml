@@ -1,0 +1,126 @@
+name: ukrainealertsbot
+
+# CasaOS install manifest. Import it via App Store → Custom Install → Import,
+# or paste it into the YAML editor. Differences from the repo's dev compose:
+#   - references the published image instead of building from source;
+#   - named volumes, not bind mounts — the container runs as the non-root `node`
+#     user (uid 1000), and a fresh named volume inherits that ownership from the
+#     image, so writes just work. A bind mount to /DATA/AppData would be owned by
+#     root and the bot could not write its subscriptions;
+#   - no ./icons mount — custom icons are already baked into the image. To
+#     override them, add your own bind mount to /app/icons with matching ownership.
+
+services:
+  ukrainealertsbot:
+    image: uasneppy/ukrainealertsbot:latest
+    container_name: ukrainealertsbot
+    restart: unless-stopped
+
+    # tini as PID 1 reaps the zombies Chromium spawns; without it defunct
+    # processes accumulate over days of running.
+    init: true
+    stop_grace_period: 20s
+
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test: ["CMD-SHELL", "[ $$(( $$(date +%s) - $$(stat -c %Y /app/data/heartbeat) )) -lt 120 ]"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+    deploy:
+      resources:
+        limits:
+          # Sized for a 2GB+ board. On a 1GB Pi, lower memory to 900M and also
+          # drop Chromium's --max-old-space-size in neptun/browser.js to match.
+          memory: 2G
+        reservations:
+          memory: 256M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    environment:
+      # REQUIRED — the bot exits immediately without it. Get one from @BotFather.
+      - BOT_TOKEN=
+      # OPTIONAL — enables the "чому тривога" AI analysis. Leave blank to run
+      # without it; the bot still answers with live NEPTUN data.
+      - GEMINI_API_KEY=
+      - TZ=Europe/Kyiv
+
+    volumes:
+      - geo-cache:/app/neptun/geo
+      - subscriptions:/app/data
+
+    x-casaos:
+      envs:
+        - container: BOT_TOKEN
+          description:
+            en_us: "Telegram bot token from @BotFather. Required — the bot won't start without it."
+            uk_ua: "Токен Telegram-бота від @BotFather. Обов'язковий — без нього бот не запуститься."
+        - container: GEMINI_API_KEY
+          description:
+            en_us: "Google Gemini API key. Optional — enables AI explanations; leave blank to run without."
+            uk_ua: "Ключ Google Gemini API. Необов'язковий — вмикає AI-пояснення; лишіть порожнім, щоб працювати без нього."
+        - container: TZ
+          description:
+            en_us: "Timezone for log timestamps."
+            uk_ua: "Часовий пояс для міток часу в логах."
+      volumes:
+        - container: /app/data
+          description:
+            en_us: "User subscriptions and alert state. Do NOT delete — losing it silently drops everyone's subscriptions."
+            uk_ua: "Підписки користувачів і стан тривог. НЕ видаляйте — втрата тихо скидає всі підписки."
+        - container: /app/neptun/geo
+          description:
+            en_us: "Cached map boundaries. Safe to delete; re-downloaded on next start."
+            uk_ua: "Кеш меж карти. Можна видаляти; завантажиться знову при старті."
+
+volumes:
+  geo-cache:
+  subscriptions:
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: ukrainealertsbot
+  author: uasneppy
+  developer: uasneppy
+  category: Utilities
+  title:
+    en_us: Ukraine Air-Raid Alerts Bot
+    uk_ua: Бот повітряних тривог України
+  tagline:
+    en_us: Live air-raid maps and alerts for Ukraine, in Telegram.
+    uk_ua: Живі карти й сповіщення про повітряні тривоги в Україні, у Telegram.
+  description:
+    en_us: >-
+      A Telegram bot that renders live air-raid threat maps for Ukraine from the
+      NEPTUN feed, answers region-scoped questions ("тривога в києві"), and
+      pushes alert / all-clear notifications to subscribed chats. This is a
+      polling worker — it exposes no web UI and no inbound port.
+    uk_ua: >-
+      Telegram-бот, що будує живі карти повітряних загроз в Україні з даних
+      NEPTUN, відповідає на запити по регіонах («тривога в києві») і надсилає
+      сповіщення про тривогу та відбій у підписані чати. Це polling-воркер —
+      без веб-інтерфейсу та без вхідного порту.
+  # 256×256 PNG. Add casaos/icon.png to the repo (see casaos/README.md) — until
+  # then the tile shows a blank icon, which does not affect installation.
+  icon: https://raw.githubusercontent.com/uasneppy/ukrainealertsbot/main/casaos/icon.png
+  tips:
+    before_install:
+      en_us: >-
+        Set BOT_TOKEN to your @BotFather token before installing. The bot has no
+        web interface — you interact with it in Telegram once it's running.
+      uk_ua: >-
+        Впишіть BOT_TOKEN (токен від @BotFather) перед встановленням. У бота
+        немає веб-інтерфейсу — спілкування відбувається в Telegram після запуску.
+  # No inbound port: this is a polling worker, so there is nothing to open.
+  port_map: ""

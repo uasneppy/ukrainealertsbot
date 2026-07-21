@@ -1,6 +1,7 @@
 # Air Raid Alerts Telegram Bot
 
 [![CI](https://github.com/uasneppy/ukrainealertsbot/actions/workflows/ci.yml/badge.svg)](https://github.com/uasneppy/ukrainealertsbot/actions/workflows/ci.yml)
+[![Docker Image](https://img.shields.io/docker/v/uasneppy/ukrainealertsbot?sort=semver&label=docker%20hub)](https://hub.docker.com/r/uasneppy/ukrainealertsbot)
 
 Telegram-бот, який показує актуальну карту повітряних загроз в Україні: відповідає мапою на слово **«тривога»**, будує наближену мапу окремого регіону, пояснює причину тривоги за допомогою AI та надсилає сповіщення про тривогу й відбій за підпискою.
 
@@ -35,7 +36,25 @@ Telegram-бот, який показує актуальну карту пові�
 
 ---
 
-## 🚀 Запуск через Docker (рекомендовано)
+## 🏠 Встановлення в CasaOS
+
+Готовий мультиарх-образ (`amd64` + `arm64`, працює і на Raspberry Pi) — на [Docker Hub](https://hub.docker.com/r/uasneppy/ukrainealertsbot). Покрокова інструкція: **[docs/INSTALL-CasaOS.md](docs/INSTALL-CasaOS.md)**. Маніфест для імпорту — [`casaos/docker-compose.yml`](casaos/docker-compose.yml).
+
+## 🐳 Запуск з готового образу
+
+```bash
+docker run -d --name ukrainealertsbot --restart unless-stopped \
+  -e BOT_TOKEN=<токен від @BotFather> \
+  -e GEMINI_API_KEY=<необов'язково> \
+  -e TZ=Europe/Kyiv \
+  -v ukrainealerts-data:/app/data \
+  -v ukrainealerts-geo:/app/neptun/geo \
+  uasneppy/ukrainealertsbot:latest
+```
+
+`-v …:/app/data` обов'язковий — це підписки й стан тривог, а не кеш.
+
+## 🚀 Запуск через Docker Compose (збірка з коду)
 
 ```bash
 cp .env.example .env      # і вписати BOT_TOKEN
