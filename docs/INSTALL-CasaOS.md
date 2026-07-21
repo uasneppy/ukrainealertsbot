@@ -10,6 +10,7 @@
 
 1. **Токен бота.** У Telegram напишіть [@BotFather](https://t.me/BotFather) → `/newbot` → скопіюйте токен виду `123456:ABC-DEF...`.
 2. *(Необов'язково)* **Ключ Gemini API** для AI-пояснень «чому тривога» — [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Без нього бот усе одно відповідає живими даними NEPTUN.
+3. *(Необов'язково)* **Ключ Stadia Maps** ([stadiamaps.com](https://stadiamaps.com), безкоштовний) у змінну `STADIA_API_KEY` — тоді на мапі міста під маркерами видно вулиці. Без нього мапа міста показує лише межі.
 
 ---
 

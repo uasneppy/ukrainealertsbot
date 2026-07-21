@@ -52,6 +52,9 @@ services:
       # OPTIONAL — enables the "чому тривога" AI analysis. Leave blank to run
       # without it; the bot still answers with live NEPTUN data.
       - GEMINI_API_KEY=
+      # OPTIONAL — a free Stadia Maps key adds streets under the markers on the
+      # city map. Leave blank for the self-contained boundary map.
+      - STADIA_API_KEY=
       - TZ=Europe/Kyiv
 
     volumes:
@@ -68,6 +71,10 @@ services:
           description:
             en_us: "Google Gemini API key. Optional — enables AI explanations; leave blank to run without."
             uk_ua: "Ключ Google Gemini API. Необов'язковий — вмикає AI-пояснення; лишіть порожнім, щоб працювати без нього."
+        - container: STADIA_API_KEY
+          description:
+            en_us: "Free Stadia Maps key. Optional — adds streets under the markers on the city map."
+            uk_ua: "Безкоштовний ключ Stadia Maps. Необов'язковий — додає вулиці під маркерами на мапі міста."
         - container: TZ
           description:
             en_us: "Timezone for log timestamps."

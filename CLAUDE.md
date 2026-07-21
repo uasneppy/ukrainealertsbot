@@ -9,8 +9,13 @@ renders itself. Node.js ESM, no build step, no framework.
 
 Data comes from NEPTUN (`neptun.in.ua`): a long-lived WebSocket for live state,
 REST for one-off fetches and as fallback. The map is rendered in headless
-Chromium with Leaflet inlined from `node_modules` — there is no CDN dependency
-at render time and no screenshotting of anyone else's site.
+Chromium with Leaflet inlined from `node_modules` — self-contained by default,
+no CDN dependency at render time and no screenshotting of anyone else's site.
+Street tiles are the one opt-in exception: set `STADIA_API_KEY` (or
+`CITY_TILES_URL`) and the *city* view draws streets under the markers; unset,
+the render is exactly as before. Keep it that way — tiles stay off by default
+and city-view only, so the self-contained property holds unless an operator
+deliberately opts in.
 
 ## Commands
 

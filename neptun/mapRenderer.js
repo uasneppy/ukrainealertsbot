@@ -111,6 +111,37 @@ function getLeafletAssets() {
 const PAGE_W = 1280;
 const PAGE_H = 800;
 
+// ── Street tiles for the city view (optional) ─────────────────────────────────
+// The map is self-contained by default — boundaries only, rendered offline, no
+// third-party tiles (see CLAUDE.md). Streets are an opt-in enhancement for the
+// tight city view, where NEPTUN's precise coordinates let you see which street a
+// threat is over. Off unless configured, so the default stays self-contained.
+//
+//   STADIA_API_KEY        → dark Stadia basemap, the recommended path (one var)
+//   CITY_TILES_URL        → any {z}/{x}/{y} template (wins over STADIA_API_KEY)
+//   CITY_TILES_ATTRIBUTION→ overrides the attribution string
+//
+// Returns null when nothing is configured — the render then behaves exactly as
+// it did before street tiles existed.
+export function resolveCityTiles(env = process.env) {
+  const attribution = env.CITY_TILES_ATTRIBUTION;
+  if (env.CITY_TILES_URL) {
+    return {
+      url: env.CITY_TILES_URL,
+      attribution: attribution || '© OpenStreetMap',
+      maxZoom: Number(env.CITY_TILES_MAX_ZOOM) || 19,
+    };
+  }
+  if (env.STADIA_API_KEY) {
+    return {
+      url: `https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png?api_key=${env.STADIA_API_KEY}`,
+      attribution: attribution || '© Stadia Maps · © OpenStreetMap',
+      maxZoom: 20,
+    };
+  }
+  return null;
+}
+
 // ── Render concurrency ────────────────────────────────────────────────────────
 // Every render opens a page on the shared Chromium, and a page holding a full
 // raion-level GeoJSON is not cheap. Unbounded concurrency (a busy group, or
@@ -273,6 +304,15 @@ function buildSkeletonHtml({ js, css }) {
   }
   .title-dot { width: 8px; height: 8px; border-radius: 50%; background: ${C.titleDot};
     box-shadow: 0 0 6px ${C.titleDot}; }
+
+  /* Tile attribution — required by the OSM/provider terms whenever street
+     tiles are shown. Small but legible, bottom-left, out of the legend's way. */
+  .tiles-attr {
+    position: fixed; bottom: 6px; left: 8px; z-index: 1000;
+    background: ${C.labelChip}; color: ${C.legendText};
+    font-family: sans-serif; font-size: 11px; padding: 2px 7px; border-radius: 4px;
+    opacity: 0.9;
+  }
 </style>
 <script>${js}</script>
 </head>
@@ -289,7 +329,7 @@ function _renderOnPage(payload) {
   const {
     ukraine, oblasts, raions,
     threats, alertedOblastKeys, alertedRaionKeys,
-    typeMeta, iconDataUrls, cities, timestamp, focusView, colors,
+    typeMeta, iconDataUrls, cities, timestamp, focusView, colors, tiles,
   } = payload;
   const C = colors;
 
@@ -307,6 +347,11 @@ function _renderOnPage(payload) {
   const oblastSet = new Set(alertedOblastKeys);
   const raionSet = new Set(alertedRaionKeys);
 
+  // Street tiles (city view only). When present they are the basemap, so the
+  // opaque oblast fill is dropped and the alert fills are softened to let the
+  // streets — the whole reason for tiles — show through.
+  const hasTiles = !!(tiles && tiles.url);
+
   /* eslint-disable no-undef */
   const map = L.map('map', {
     zoomControl: false,
@@ -320,24 +365,38 @@ function _renderOnPage(payload) {
     keyboard: false,
   });
 
-  // 1. Oblast fills — whole-oblast alert → strong red "active" tone
+  let baseTiles = null;
+  if (hasTiles) {
+    baseTiles = L.tileLayer(tiles.url, {
+      maxZoom: tiles.maxZoom || 19,
+      detectRetina: true,
+      crossOrigin: true,
+      keepBuffer: 0,
+    }).addTo(map);
+  }
+
+  // 1. Oblast fills — whole-oblast alert → strong red "active" tone. Over tiles
+  //    the unalerted fill is dropped entirely and the alert tint is softened.
   L.geoJSON(oblasts, {
     style: (f) => (oblastSet.has(featKey(f))
-      ? { stroke: false, fillColor: C.oblastAlertFill, fillOpacity: 0.42 }
-      : { stroke: false, fillColor: C.oblastFill, fillOpacity: 0.94 }),
+      ? { stroke: false, fillColor: C.oblastAlertFill, fillOpacity: hasTiles ? 0.28 : 0.42 }
+      : { stroke: false, fillColor: C.oblastFill, fillOpacity: hasTiles ? 0 : 0.94 }),
   }).addTo(map);
 
-  // 2. Raion grid — thin borders for texture
-  L.geoJSON(raions, {
-    style: () => ({ color: C.raionGrid, weight: 0.7, opacity: 0.9, fill: false }),
-  }).addTo(map);
+  // 2. Raion grid — thin borders for texture. Skipped over tiles, which already
+  //    carry far more detail than a grid would add.
+  if (!hasTiles) {
+    L.geoJSON(raions, {
+      style: () => ({ color: C.raionGrid, weight: 0.7, opacity: 0.9, fill: false }),
+    }).addTo(map);
+  }
 
   // 3. Alerted raions — amber "watch" fill (individual districts, lower
   //    severity than a whole-oblast alert, so a distinct hue rather than a
   //    paler version of the same red)
   L.geoJSON(raions, {
     filter: (f) => raionSet.has(featKey(f)),
-    style: () => ({ color: C.raionAlertBorder, weight: 1.1, opacity: 0.9, fillColor: C.raionAlertFill, fillOpacity: 0.30 }),
+    style: () => ({ color: C.raionAlertBorder, weight: 1.1, opacity: 0.9, fillColor: C.raionAlertFill, fillOpacity: hasTiles ? 0.20 : 0.30 }),
   }).addTo(map);
 
   // 4. Oblast borders above the fills
@@ -507,7 +566,14 @@ function _renderOnPage(payload) {
     + '<span>' + (focusView && focusView.name ? 'NEPTUN — ' + focusView.name : 'NEPTUN — Карта загроз') + '</span>'
     + '<span style="color:#607a94;font-size:11px">' + timestamp + '</span></div>';
 
-  document.body.insertAdjacentHTML('beforeend', legendHtml + titleHtml);
+  // Tile attribution is a licence requirement, not decoration — always shown
+  // when tiles are on. `tiles.attribution` is operator-set config, not feed
+  // input, but escape it anyway before putting it in the DOM.
+  const attrHtml = hasTiles
+    ? '<div class="tiles-attr">' + esc(tiles.attribution || '© OpenStreetMap') + '</div>'
+    : '';
+
+  document.body.insertAdjacentHTML('beforeend', legendHtml + titleHtml + attrHtml);
 
   // Keep city names readable. Runs after the panels are inserted, or they
   // aren't in the DOM to be measured and a name ends up under the legend. Leaflet has no label collision, so a name
@@ -567,7 +633,18 @@ function _renderOnPage(payload) {
     placedLabels.push(grow(label.getBoundingClientRect(), 2));
   });
 
-  window.__mapReady = true;
+  // Without tiles the map is drawn synchronously and is ready now. With tiles,
+  // wait for them to load before signalling ready — but cap the wait, so one
+  // slow or failed tile can't hang the render (we'd rather ship a map with a
+  // gap than no map at all).
+  if (baseTiles) {
+    let ready = false;
+    const finish = () => { if (!ready) { ready = true; window.__mapReady = true; } };
+    baseTiles.on('load', finish);
+    setTimeout(finish, 3500);
+  } else {
+    window.__mapReady = true;
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -599,6 +676,10 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
 
   // Per-type metadata for markers, legend and caption.
   const typeMeta = computeTypeMeta(metaSource);
+
+  // Street tiles only for the city view — pointless at oblast/national zoom, and
+  // it keeps tile traffic to the one view that benefits. null unless configured.
+  const tiles = focus && focus.kind === 'city' ? resolveCityTiles() : null;
 
   // Marker icons: built-in SVG badges (font-independent), overridden by any
   // user files from the icons/ folder — re-read every render, so icons can be
@@ -671,9 +752,12 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
       timestamp,
       focusView,
       colors: MAP_COLORS,
+      tiles,
     });
 
-    await page.waitForFunction(() => window.__mapReady === true, { timeout: 5_000 });
+    // Tiles load over the network in headless Chromium, so allow more time; the
+    // page caps its own wait, so this is only an upper bound.
+    await page.waitForFunction(() => window.__mapReady === true, { timeout: tiles ? 12_000 : 5_000 });
 
     const buffer = await page.screenshot({ type: 'png', fullPage: false });
     const caption = focusStatus ? buildFocusCaption(focusStatus, now) : buildCaption(typeMeta, alerts, now);
