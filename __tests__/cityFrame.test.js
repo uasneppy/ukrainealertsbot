@@ -1,69 +1,45 @@
 /**
- * The frame has to agree with the caption. A city map captioned
- * "Загрози (4)" that shows one marker — the other three cropped out — is worse
- * than useless during an attack, because the ones approaching are exactly what
- * the person is asking about.
+ * A city view must stay a *city* view. The bug this guards against: a single
+ * threat tens of km away pulling the frame out until Kyiv is a dot. Distant
+ * "поблизу" threats belong on the oblast map and in the caption, not on the
+ * tight city frame.
  */
 import { describe, it, expect } from 'vitest';
 
-import { computeCityFrameKm } from '../neptun/mapRenderer.js';
+import { computeCityFrameKm, CITY_FRAME_MAX_KM } from '../neptun/mapRenderer.js';
 
 const at = (distanceKm) => ({ distanceKm });
 
 describe('computeCityFrameKm', () => {
-  it('stays tight when nothing is around', () => {
-    expect(computeCityFrameKm({ radiusKm: 65 })).toBe(28);
+  it('is a tight city view when nothing is close', () => {
+    expect(computeCityFrameKm({})).toBe(24);
+    expect(computeCityFrameKm({ threatsIn: [], threatsNear: [] })).toBe(24);
   });
 
-  it('hugs the city when threats are right on top of it', () => {
-    expect(computeCityFrameKm({ radiusKm: 65, threatsIn: [at(2), at(5)] })).toBe(18);
+  it('hugs the city when threats are right over it', () => {
+    expect(computeCityFrameKm({ threatsIn: [at(2), at(5)] })).toBe(16);
   });
 
-  it('opens up to include a threat inside the radius', () => {
-    const frame = computeCityFrameKm({ radiusKm: 65, threatsIn: [at(40)] });
-
-    expect(frame).toBeGreaterThan(40);
-    expect(frame).toBeLessThan(60);
+  it('opens up to include a threat within the metro area', () => {
+    const frame = computeCityFrameKm({ threatsIn: [at(25)] });
+    expect(frame).toBeGreaterThan(25);
+    expect(frame).toBeLessThanOrEqual(CITY_FRAME_MAX_KM);
   });
 
-  it('includes nearby threats the caption counts', () => {
-    // The regression: these were counted but cropped out.
-    const frame = computeCityFrameKm({
-      radiusKm: 65,
-      threatsIn: [at(10)],
-      threatsNear: [at(78), at(92)],
-    });
-
-    expect(frame).toBeGreaterThanOrEqual(92);
+  it('does NOT zoom out for a distant threat — the city stays the subject', () => {
+    // The reported bug: a lone drone ~90 km out turned Kyiv into a dot.
+    expect(computeCityFrameKm({ threatsNear: [at(90)] })).toBe(24);
+    expect(computeCityFrameKm({ threatsIn: [at(3)], threatsNear: [at(90)] })).toBe(16);
   });
 
-  it('ignores threats too far to belong in a city view', () => {
-    // 200 km away is a national-map concern; the caption still lists it.
-    const frame = computeCityFrameKm({ radiusKm: 65, threatsIn: [at(10)], threatsNear: [at(200)] });
-
-    expect(frame).toBeLessThan(60);
-  });
-
-  it('never zooms out past the point where the city is a dot', () => {
-    const frame = computeCityFrameKm({
-      radiusKm: 65,
-      threatsNear: [at(100), at(104)],
-    });
-
-    expect(frame).toBe(95);
-  });
-
-  it('scales the nearby cut-off with the city radius', () => {
-    // A 45 km city (Луцьк) admits less than a 65 km one (Київ).
-    const small = computeCityFrameKm({ radiusKm: 45, threatsNear: [at(80)] });
-    const large = computeCityFrameKm({ radiusKm: 65, threatsNear: [at(80)] });
-
-    expect(small).toBe(28); // 80 > 45 * 1.6 — excluded
-    expect(large).toBeGreaterThan(80); // 80 < 65 * 1.6 — included
+  it('never exceeds the metro-scale cap', () => {
+    // A threat right at the inclusion edge still can't blow the frame open.
+    expect(computeCityFrameKm({ threatsNear: [at(40)] })).toBeLessThanOrEqual(CITY_FRAME_MAX_KM);
+    expect(computeCityFrameKm({ threatsIn: [at(40)] })).toBe(CITY_FRAME_MAX_KM);
   });
 
   it('tolerates missing input', () => {
-    expect(computeCityFrameKm()).toBe(28);
-    expect(computeCityFrameKm({})).toBe(28);
+    expect(() => computeCityFrameKm()).not.toThrow();
+    expect(computeCityFrameKm()).toBe(24);
   });
 });

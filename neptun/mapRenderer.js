@@ -175,30 +175,33 @@ export function renderQueueStats() {
   return { active: _activeRenders, queued: _renderQueue.length, limit: MAX_CONCURRENT_RENDERS };
 }
 
+/** Distance below which a threat is close enough to belong in the city frame. */
+export const CITY_FRAME_INCLUDE_KM = 40;
+/** Never zoom out past this half-extent — beyond it the city is a dot. */
+export const CITY_FRAME_MAX_KM = 46;
+
 /**
  * Half-extent of a city view, in km.
  *
- * Tight enough to see which locality a threat is over, wide enough to include
- * what the caption and legend count. Framing only threats *inside* the radius
- * produced maps captioned "Загрози (4)" showing a single marker, with the three
- * approaching ones off-frame — and during an attack those are the point of
- * asking. Threats far outside stay off-frame; the caption gives their distance.
+ * A city view must stay a *city* view. It shows the city and its immediate
+ * surroundings, expanding just enough to include threats that are genuinely
+ * close (≤ CITY_FRAME_INCLUDE_KM). A target tens of km out belongs on the
+ * oblast map — pulling the frame out to fit one distant drone turns Kyiv into a
+ * dot, which is the bug this guards against. Distant threats are still in the
+ * caption's "Поблизу" section and counted only there, not on this map.
  *
  * @param {object} opts
- * @param {number} opts.radiusKm      City radius from the region descriptor
- * @param {Array}  opts.threatsIn     Threats inside the radius
+ * @param {Array}  opts.threatsIn     Threats classified as inside the region
  * @param {Array}  opts.threatsNear   Threats outside it but nearby
  */
-export function computeCityFrameKm({ radiusKm = 60, threatsIn = [], threatsNear = [] } = {}) {
-  const approaching = threatsNear.filter((t) => t.distanceKm <= radiusKm * 1.6);
-  const framed = [...threatsIn, ...approaching];
+export function computeCityFrameKm({ threatsIn = [], threatsNear = [] } = {}) {
+  const framed = [...threatsIn, ...threatsNear].filter((t) => t.distanceKm <= CITY_FRAME_INCLUDE_KM);
 
-  let frameKm = framed.length ? 18 : 28;
+  let frameKm = framed.length ? 16 : 24;
   for (const threat of framed) {
-    frameKm = Math.max(frameKm, threat.distanceKm * 1.12 + 6);
+    frameKm = Math.max(frameKm, threat.distanceKm * 1.2 + 6);
   }
-  // Past this the city itself is a dot and it stops being a city view.
-  return Math.min(frameKm, 95);
+  return Math.min(frameKm, CITY_FRAME_MAX_KM);
 }
 
 /** Per-type counts, names, emoji and colours for the legend and captions. */
@@ -680,13 +683,27 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
   const { oblastKeys, raionKeys } = computeAlertKeySets(alerts);
 
   // Focused (region-detail) mode: the legend and caption cover only threats in
-  // or near the region, while the map still draws every threat in the frame.
+  // or near the region.
   const focusStatus = focus
     ? buildRegionStatus({ region: focus, threats, alerts, geo: geoData })
     : null;
-  const metaSource = focusStatus
-    ? [...focusStatus.threatsIn, ...focusStatus.threatsNear]
-    : threats;
+
+  // City view: compute the frame up front so the legend counts exactly what the
+  // tight frame shows. Counting far "поблизу" threats the frame excludes gave a
+  // legend of "Загрози (1)" over a map with no marker (and vice-versa).
+  const cityFrameKm = focus && focus.kind === 'city' && focusStatus
+    ? computeCityFrameKm({ threatsIn: focusStatus.threatsIn, threatsNear: focusStatus.threatsNear })
+    : null;
+
+  let metaSource;
+  if (!focusStatus) {
+    metaSource = threats;
+  } else if (cityFrameKm != null) {
+    metaSource = [...focusStatus.threatsIn, ...focusStatus.threatsNear]
+      .filter((t) => t.distanceKm <= cityFrameKm);
+  } else {
+    metaSource = [...focusStatus.threatsIn, ...focusStatus.threatsNear];
+  }
 
   // Per-type metadata for markers, legend and caption.
   const typeMeta = computeTypeMeta(metaSource);
@@ -745,14 +762,9 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
     if (focus && focus.kind === 'oblast') {
       focusView = { kind: 'oblast', key: focus.geoKey, name: focus.name };
     } else if (focus) {
-      const frameKm = computeCityFrameKm({
-        radiusKm: focus.radiusKm ?? 60,
-        threatsIn: focusStatus ? focusStatus.threatsIn : [],
-        threatsNear: focusStatus ? focusStatus.threatsNear : [],
-      });
       focusView = {
         kind: 'city', name: focus.name, lat: focus.lat, lon: focus.lon,
-        radiusKm: focus.radiusKm ?? 60, frameKm,
+        radiusKm: focus.radiusKm ?? 60, frameKm: cityFrameKm ?? computeCityFrameKm({}),
       };
     }
 
