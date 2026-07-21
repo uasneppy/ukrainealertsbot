@@ -149,10 +149,15 @@ export function parseRegionQuery(text) {
   // use lookarounds / explicit whitespace instead.
   const why = /(?<![а-яґєіїa-z])(?:чому|чого|почему)(?![а-яґєіїa-z])/u.test(norm);
 
-  let match = norm.match(new RegExp(`тривог\\S*\\s+(?:в|у|на|по)\\s+(${REGION_CHARS}{2,60})`, 'u'));
+  // The preposition is optional now: "тривога київ" is as valid as
+  // "тривога в києві". resolveRegion rejects non-regions, so the looser capture
+  // ("тривога зараз" → "зараз") simply resolves to nothing.
+  let match = norm.match(new RegExp(`тривог\\S*\\s+(?:(?:в|у|на|по)\\s+)?(${REGION_CHARS}{2,60})`, 'u'));
   let regionText = match?.[1];
 
   if (!regionText) {
+    // Inverted order ("в харкові тривога") keeps the preposition mandatory:
+    // without it the region group greedily swallows the leading "чому в".
     match = norm.match(new RegExp(`(?:^|\\s)(?:в|у|на|по)\\s+(${REGION_CHARS}{2,60}?)\\s+тривог`, 'u'));
     regionText = match?.[1];
   }
@@ -206,13 +211,11 @@ const toRegion = (def) => {
 };
 
 /**
- * Resolves a region phrase ("києві", "київській області", "харківщині",
- * "ар крим"…) to a region descriptor, or null when nothing matches.
+ * Longest-prefix region match over already-cleaned text, with the city↔oblast
+ * tie-break. Returns { winner: def, len } (len = matched prefix length) or null.
+ * Shared by resolveRegion and resolveRegionStrict so the tie-break lives once.
  */
-export function resolveRegion(rawText) {
-  const text = cleanRegionText(rawText);
-  if (!text) return null;
-
+function matchRegionDefs(text) {
   const matches = [];
   for (const def of ALL_DEFS) {
     for (const prefix of def.prefixes) {
@@ -238,7 +241,54 @@ export function resolveRegion(rawText) {
     if (parent && winner.alertKey == null) winner = parent;
   }
 
-  return toRegion(winner);
+  return { winner, len: maxLen };
+}
+
+/**
+ * Resolves a region phrase ("києві", "київській області", "харківщині",
+ * "ар крим"…) to a region descriptor, or null when nothing matches.
+ * Prefix-based: a sentence that merely starts with a city name still resolves
+ * (that's what parseRegionQuery wants). For "the whole message IS a region",
+ * use resolveRegionStrict.
+ */
+export function resolveRegion(rawText) {
+  const text = cleanRegionText(rawText);
+  if (!text) return null;
+  const m = matchRegionDefs(text);
+  return m ? toRegion(m.winner) : null;
+}
+
+// A lone trailing "область" / "район" word (in any common declension) after a
+// region name is still the same region — but nothing else may follow.
+const REGION_SUFFIX_ONLY = /^(?:областе?[йю]?|област[іь]?|обл\.?|району?|районі|р-н)$/u;
+
+/**
+ * Resolves ONLY when the entire cleaned phrase is a region — the region name
+ * plus its inflection, optionally followed by a lone "область"/"район" word,
+ * and nothing more. This is the safe trigger for a bare region name as a whole
+ * chat message: "київ", "києві", "київщина", "київська область" all match,
+ * while "їду в київ", "харків тримайся" or "київ найкраще місто" do not, so an
+ * ordinary sentence that mentions a city never fires a map.
+ *
+ * @returns region descriptor (kind oblast|city|country) or null
+ */
+export function resolveRegionStrict(rawText) {
+  const text = cleanRegionText(rawText);
+  if (!text) return null;
+
+  const m = matchRegionDefs(text);
+  if (!m) return null;
+
+  // Everything after the matched region prefix: the inflection on the region's
+  // final token, then any remaining words.
+  const afterPrefix = text.slice(m.len);
+  const tokenTail = afterPrefix.match(/^\S*/u)[0]; // inflection glued to the region
+  const rest = afterPrefix.slice(tokenTail.length).trim();
+
+  if (rest === '') return toRegion(m.winner);
+  // The only word allowed to follow is a region-type suffix ("область"/"район").
+  if (!rest.includes(' ') && REGION_SUFFIX_ONLY.test(rest)) return toRegion(m.winner);
+  return null;
 }
 
 export const __testables = {

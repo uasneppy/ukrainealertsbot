@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { parseRegionQuery, resolveRegion, __testables } from '../neptun/regionResolver.js';
+import { parseRegionQuery, resolveRegion, resolveRegionStrict, __testables } from '../neptun/regionResolver.js';
 
 describe('parseRegionQuery', () => {
   it('parses "Тривога в Києві"', () => {
@@ -188,5 +188,41 @@ describe('resolveRegion — misc', () => {
   it('cache keys are stable and distinct', () => {
     expect(resolveRegion('києві').cacheKey).toBe('c:київ');
     expect(resolveRegion('київській області').cacheKey).toBe('o:київська');
+  });
+});
+
+describe('resolveRegionStrict — whole message is a region', () => {
+
+
+  it('resolves a bare region name in any common form', () => {
+    expect(resolveRegionStrict('київ')).toMatchObject({ kind: 'city', name: 'Київ' });
+    expect(resolveRegionStrict('києві')).toMatchObject({ name: 'Київ' });
+    expect(resolveRegionStrict('харкова')).toMatchObject({ name: 'Харків' });
+    expect(resolveRegionStrict('київщина')).toMatchObject({ kind: 'oblast', name: 'Київська область' });
+    expect(resolveRegionStrict('київська область')).toMatchObject({ kind: 'oblast' });
+    expect(resolveRegionStrict('львівській області')).toMatchObject({ name: 'Львівська область' });
+    expect(resolveRegionStrict('кривий ріг')).toMatchObject({ name: 'Кривий Ріг' });
+    expect(resolveRegionStrict('ар крим')).toMatchObject({ name: 'АР Крим' });
+  });
+
+  it('strips a leading preposition', () => {
+    expect(resolveRegionStrict('в києві')).toMatchObject({ name: 'Київ' });
+    expect(resolveRegionStrict('на харківщині')).toMatchObject({ name: 'Харківська область' });
+  });
+
+  it('rejects a city merely mentioned in a longer phrase', () => {
+    for (const text of ['їду в київ', 'харків тримайся', 'київ найкраще місто', 'спокій київ']) {
+      expect(resolveRegionStrict(text), `"${text}"`).toBeNull();
+    }
+  });
+
+  it('rejects non-regions and empty input', () => {
+    expect(resolveRegionStrict('мордор')).toBeNull();
+    expect(resolveRegionStrict('')).toBeNull();
+    expect(resolveRegionStrict('тривога')).toBeNull();
+  });
+
+  it('does not mistake "область" glued to a non-region', () => {
+    expect(resolveRegionStrict('погана область')).toBeNull();
   });
 });
