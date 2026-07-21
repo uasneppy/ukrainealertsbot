@@ -43,7 +43,7 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/regionResolver.js` | Free-text Ukrainian region/city → region descriptor |
 | `neptun/regionContext.js` | Per-region threat/alert analysis, report and caption builders |
 | `neptun/subscriptions.js` | Persisted per-chat region subscriptions |
-| `neptun/alertWatcher.js` | Polls region alert state, emits alert/all-clear transitions |
+| `neptun/alertWatcher.js` | Polls subscribed regions; emits alert/all-clear transitions and live per-target events (missiles/ballistics appearing near / entering a region) |
 | `neptun/alertState.js` | Last announced state per region, so a restart doesn't swallow transitions |
 | `neptun/messageRouter.js` | Pure: message text → which reply it asks for |
 | `neptun/keyboards.js` | Inline buttons and their 64-byte callback payloads |

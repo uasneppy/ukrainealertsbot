@@ -29,7 +29,7 @@ import {
   MAX_PER_CHAT,
 } from './neptun/subscriptions.js';
 import { formatStatusReport } from './neptun/statusReport.js';
-import { createAlertWatcher, formatAlertNotification } from './neptun/alertWatcher.js';
+import { createAlertWatcher, formatAlertNotification, formatThreatNotification } from './neptun/alertWatcher.js';
 import {
   loadAlertState,
   recordAlertState,
@@ -500,6 +500,19 @@ if (token && !isTestEnv) {
   // transition that happened while the process was down.
   const persistedAlertState = {};
 
+  // Live per-target alerts tuning. Unset OR empty → watcher defaults (empty is
+  // important: `docker compose` sets `${LIVE_ALERT_TYPES:-}` to "" when unset,
+  // and that must not silently disable the feature). Explicit "none"/"off"
+  // disables it; a comma list overrides the type set.
+  const rawTypes = (process.env.LIVE_ALERT_TYPES ?? '').trim();
+  let liveAlertTypes; // undefined → keep the watcher's default set
+  if (rawTypes) {
+    liveAlertTypes = /^(none|off)$/i.test(rawTypes)
+      ? []
+      : rawTypes.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  }
+  const liveAlertKm = Number(process.env.LIVE_ALERT_KM) || undefined;
+
   const alertWatcher = createAlertWatcher({
     initialStates: persistedAlertState,
     onStateChange: recordAlertState,
@@ -507,11 +520,15 @@ if (token && !isTestEnv) {
     // disagree. null when nothing trustworthy is available, so the tick skips.
     getSnapshot: () => liveSnapshot.getOrNull(),
     getGeo: getGeoData,
+    ...(liveAlertTypes ? { liveAlertTypes } : {}),
+    ...(liveAlertKm ? { liveAlertKm } : {}),
     // Enqueue and return: the tick must not sit waiting on a fan-out that is
     // paced over seconds, or ticks would overlap during a nationwide alert.
-    notify: ({ region, chatIds, active, status }) => {
-      const text = formatAlertNotification({ region, active, status });
-      for (const chatId of chatIds) notificationSender.sendTo(chatId, text);
+    notify: (event) => {
+      const text = event.kind === 'threat'
+        ? formatThreatNotification(event)
+        : formatAlertNotification(event);
+      for (const chatId of event.chatIds) notificationSender.sendTo(chatId, text);
     },
   });
 

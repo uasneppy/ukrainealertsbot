@@ -130,7 +130,7 @@ export function fmtKyivTime(iso) {
 
 // ── Region status ─────────────────────────────────────────────────────────────
 
-const describeThreat = (t, { distanceKm, direction, directionShort, inRegion }) => {
+const describeThreat = (t, { distanceKm, direction, directionShort, inRegion, bearingFromRegion = null }) => {
   const type = String(t?.type ?? 'unknown').toLowerCase();
   return {
     id: t?.id,
@@ -148,6 +148,9 @@ const describeThreat = (t, { distanceKm, direction, directionShort, inRegion }) 
     distanceKm: Math.round(distanceKm),
     direction,
     directionShort,
+    // Numeric bearing from the region to the threat — lets the watcher tell an
+    // approaching threat from one that's merely nearby but heading away.
+    bearingFromRegion: Number.isFinite(bearingFromRegion) ? bearingFromRegion : null,
     inRegion,
     explanationShort: t?.explanationShort ?? '',
   };
@@ -220,6 +223,7 @@ export function buildRegionStatus({ region, threats = [], alerts = {}, geo = {} 
             distanceKm: d,
             direction: bearingToWord(b),
             directionShort: bearingToWord(b, { short: true }),
+            bearingFromRegion: b,
             inRegion: false,
           }));
         }
@@ -264,6 +268,7 @@ export function buildRegionStatus({ region, threats = [], alerts = {}, geo = {} 
         distanceKm: d,
         direction: bearingToWord(b),
         directionShort: bearingToWord(b, { short: true }),
+        bearingFromRegion: b,
         inRegion: d <= inKm,
       });
       (desc.inRegion ? threatsIn : threatsNear).push(desc);

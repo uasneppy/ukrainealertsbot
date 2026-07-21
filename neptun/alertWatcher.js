@@ -1,19 +1,26 @@
 /**
- * Watches subscribed regions and reports alert start / all-clear transitions.
+ * Watches subscribed regions and reports two kinds of unprompted notification:
  *
- * Three rules make the difference between a useful notifier and a harmful one:
+ *   • Alert transitions — тривога starting / відбій — per region.
+ *   • Live threat events — a fast, dangerous target (missile, ballistic, KAB,
+ *     MiG-31K) appearing near a subscribed region or entering it. These are the
+ *     "react now" notifications the operator asked for.
+ *
+ * Rules that keep this a notifier and not a firehose:
  *
  *  1. Never announce from stale data. If the stream isn't fresh the tick is
- *     skipped entirely — an "відбій" sent because our socket died is worse
- *     than no message at all, since people act on it.
- *  2. Edge-triggered, and the first observation only seeds state. Otherwise
- *     every restart would blast "тривога" at every subscriber for alerts that
- *     have been running for hours.
- *  3. Confirmation is asymmetric. An alert starting goes out immediately —
- *     people are heading for shelter and a minute of debounce is a minute of
- *     warning thrown away. An all-clear must hold for CONFIRM_OFF_MS first,
- *     because telling someone it's over when it isn't is the one mistake here
- *     with a real cost.
+ *     skipped entirely — an "відбій" or a phantom missile from a dead socket is
+ *     worse than silence, because people act on it.
+ *  2. Edge-triggered, and the first observation only seeds state. A restart must
+ *     not re-blast "тривога" — or "ракета летить" — for things already in the
+ *     sky when the bot came up.
+ *  3. Confirmation is asymmetric for alerts: тривога goes out at once, відбій
+ *     must hold for CONFIRM_OFF_MS first (a premature all-clear is the costly
+ *     mistake).
+ *  4. Threat events are event-based, not continuous. A target is announced when
+ *     it appears (approaching) and again when it enters the region — never per
+ *     tick as it drifts, which is the main source of spam. Only high-priority
+ *     types qualify; drones/recon are covered by the region alert and the map.
  *
  * Dependencies are injected so the whole thing is testable without a socket.
  */
@@ -29,10 +36,27 @@ export const DEFAULT_INTERVAL_MS = 20_000;
 
 /**
  * How old persisted state may be and still be worth reconciling against. After
- * a long outage the transitions people missed are history, not news, and a
- * burst of them on boot is noise at best.
+ * a long outage the transitions people missed are history, not news.
  */
 export const DEFAULT_STALE_STATE_MS = 6 * 60 * 60 * 1000;
+
+/** Fast, dangerous types that get per-target live notifications. */
+export const DEFAULT_LIVE_ALERT_TYPES = ['missile', 'ballistic', 'kab', 'mig31k'];
+/** A "near" target this far or closer, and approaching, is worth announcing. */
+export const DEFAULT_LIVE_ALERT_KM = 120;
+/** Heading within this many degrees of the region counts as "approaching". */
+const APPROACH_CONE_DEG = 60;
+
+/** True when a nearby target is heading roughly toward the region. */
+function isApproaching(threat) {
+  if (threat.inRegion) return true;
+  // Unknown heading/bearing → assume yes; never suppress a possible threat.
+  if (!Number.isFinite(threat.heading) || !Number.isFinite(threat.bearingFromRegion)) return true;
+  const towardRegion = (threat.bearingFromRegion + 180) % 360;
+  const raw = Math.abs((threat.heading - towardRegion + 360) % 360);
+  const angle = Math.min(raw, 360 - raw);
+  return angle <= APPROACH_CONE_DEG;
+}
 
 export function createAlertWatcher({
   getSnapshot,
@@ -42,26 +66,63 @@ export function createAlertWatcher({
   confirmOnMs = DEFAULT_CONFIRM_ON_MS,
   confirmOffMs = DEFAULT_CONFIRM_OFF_MS,
   intervalMs = DEFAULT_INTERVAL_MS,
-  // What we last told subscribers, from before the restart.
   initialStates = null,
   onStateChange = null,
   staleStateMs = DEFAULT_STALE_STATE_MS,
+  liveAlertTypes = DEFAULT_LIVE_ALERT_TYPES,
+  liveAlertKm = DEFAULT_LIVE_ALERT_KM,
   now = () => Date.now(),
 } = {}) {
   if (typeof getSnapshot !== 'function') throw new Error('getSnapshot is required');
   if (typeof getGeo !== 'function') throw new Error('getGeo is required');
   if (typeof notify !== 'function') throw new Error('notify is required');
 
-  /** cacheKey → { confirmed, candidate, candidateSince } */
+  const prioritySet = new Set(liveAlertTypes);
+  /** cacheKey → { confirmed, candidate, candidateSince, threats: Map<id, stage> } */
   const states = new Map();
   let timer = null;
+
+  /**
+   * Reconciles the tracked high-priority threats for a region against the
+   * current status, returning the events to announce. `seeding` records the
+   * current set silently (first tick / restart) so nothing already in the sky
+   * is re-announced.
+   *
+   * @returns {Array<{ stage: 'near'|'in', threat: object }>}
+   */
+  function trackThreats(tracked, status, seeding) {
+    // "in" wins over "near" for the same id; keep the strongest stage per id.
+    const byId = new Map();
+    const consider = (threat, stage) => {
+      if (!threat?.id || !prioritySet.has(threat.type)) return;
+      const prev = byId.get(threat.id);
+      if (!prev || (prev.stage === 'near' && stage === 'in')) byId.set(threat.id, { threat, stage });
+    };
+    for (const threat of status.threatsIn) consider(threat, 'in');
+    for (const threat of status.threatsNear) {
+      if (threat.distanceKm <= liveAlertKm && isApproaching(threat)) consider(threat, 'near');
+    }
+
+    const events = [];
+    const seen = new Set();
+    for (const [id, { threat, stage }] of byId) {
+      seen.add(id);
+      const prevStage = tracked.get(id);
+      tracked.set(id, stage);
+      if (seeding) continue; // record silently the first time we see the region
+      if (!prevStage) events.push({ stage, threat });                       // appeared
+      else if (prevStage === 'near' && stage === 'in') events.push({ stage: 'in', threat }); // entered
+      // prev 'in' → nothing; 'near' → 'near' → nothing (no per-tick drift spam)
+    }
+    // A track that's gone (passed / lost) is dropped; a new id re-notifies.
+    for (const id of [...tracked.keys()]) if (!seen.has(id)) tracked.delete(id);
+    return events;
+  }
 
   async function tick() {
     const regions = listRegions();
     if (!regions.length) return { skipped: 'no-subscribers', announced: [] };
 
-    // null means "nothing trustworthy to reason about" — see rule 1. Awaited
-    // because the authoritative source is the API, not in-memory stream state.
     const snapshot = await getSnapshot();
     if (!snapshot) return { skipped: 'stale', announced: [] };
 
@@ -79,54 +140,53 @@ export function createAlertWatcher({
       const active = status.alertActive;
 
       let state = states.get(region.cacheKey);
-      if (!state) {
+      const seeding = !state;
+
+      // ── Alert transition (тривога / відбій) ──
+      if (seeding) {
         const remembered = initialStates ? initialStates[region.cacheKey] : null;
         const usable =
           remembered &&
           typeof remembered.confirmed === 'boolean' &&
           t - (remembered.at ?? 0) <= staleStateMs;
 
+        state = { confirmed: active, candidate: active, candidateSince: t, threats: new Map() };
+        states.set(region.cacheKey, state);
+
         if (usable && remembered.confirmed !== active) {
-          // The state changed while we were down — a deploy during a raid. This
-          // is the one case where the first tick must speak: a subscriber is
-          // waiting for a push that already silently didn't happen.
-          states.set(region.cacheKey, { confirmed: active, candidate: active, candidateSince: t });
+          // Changed while we were down — a deploy during a raid. The one case
+          // where the first tick must speak.
           onStateChange?.(region.cacheKey, active, t);
-          announced.push({ region, chatIds, active, status, missedWhileDown: true });
-          continue;
+          announced.push({ kind: 'alert', region, chatIds, active, status, missedWhileDown: true });
+        } else if (!usable) {
+          onStateChange?.(region.cacheKey, active, t);
         }
-
-        // Rule 2 otherwise: seed silently, so a restart doesn't re-announce
-        // raids that have been running for hours.
-        states.set(region.cacheKey, { confirmed: active, candidate: active, candidateSince: t });
-        if (!usable) onStateChange?.(region.cacheKey, active, t);
-        continue;
+      } else {
+        if (active !== state.candidate) {
+          state.candidate = active;
+          state.candidateSince = t;
+        }
+        const requiredHoldMs = state.candidate ? confirmOnMs : confirmOffMs;
+        if (state.candidate !== state.confirmed && t - state.candidateSince >= requiredHoldMs) {
+          state.confirmed = state.candidate;
+          onStateChange?.(region.cacheKey, state.confirmed, t);
+          announced.push({ kind: 'alert', region, chatIds, active: state.confirmed, status });
+        }
       }
 
-      if (active !== state.candidate) {
-        state.candidate = active;
-        state.candidateSince = t;
-      }
-
-      // Rule 3: alerts go out at once, all-clears have to prove themselves.
-      const requiredHoldMs = state.candidate ? confirmOnMs : confirmOffMs;
-      if (state.candidate !== state.confirmed && t - state.candidateSince >= requiredHoldMs) {
-        state.confirmed = state.candidate;
-        onStateChange?.(region.cacheKey, state.confirmed, t);
-        announced.push({ region, chatIds, active: state.confirmed, status });
+      // ── Live threat events (missiles / ballistics / …) ──
+      const events = trackThreats(state.threats, status, seeding);
+      if (events.length) {
+        // One message per region per tick, even for several targets at once.
+        announced.push({ kind: 'threat', region, chatIds, events, status });
       }
     }
 
     for (const event of announced) {
-      // One unreachable chat (blocked bot, deleted group) must not stop the
-      // rest of the notifications from going out.
       try {
         await notify(event);
       } catch (err) {
-        console.error(
-          `[alert-watcher] notify failed for ${event.region.name}:`,
-          err?.message ?? err
-        );
+        console.error(`[alert-watcher] notify failed for ${event.region.name}:`, err?.message ?? err);
       }
     }
 
@@ -135,10 +195,7 @@ export function createAlertWatcher({
 
   return {
     tick,
-
-    /** Current confirmed state per region — diagnostics and tests. */
-    snapshotStates: () => new Map([...states].map(([k, v]) => [k, { ...v }])),
-
+    snapshotStates: () => new Map([...states].map(([k, v]) => [k, { ...v, threats: new Map(v.threats) }])),
     start() {
       if (timer) return;
       timer = setInterval(() => {
@@ -146,7 +203,6 @@ export function createAlertWatcher({
       }, intervalMs);
       timer.unref?.();
     },
-
     stop() {
       if (timer) {
         clearInterval(timer);
@@ -156,31 +212,71 @@ export function createAlertWatcher({
   };
 }
 
-/** Ukrainian notification text for a confirmed transition. */
+// ── Notification text ─────────────────────────────────────────────────────────
+
+/** Ukrainian text for an alert transition (тривога / відбій). */
 export function formatAlertNotification({ region, active, status }) {
   if (!active) {
     return `🟢 Відбій тривоги — ${region.name}`;
   }
 
-  // The "since" time matters most when the alert started while the bot was
-  // down: without it the message reads as breaking news for something that may
-  // have begun twenty minutes ago.
   const since = fmtKyivTime(status?.alertSince);
   const lines = [`🔴 Повітряна тривога — ${region.name}${since ? ` (з ${since})` : ''}`];
 
   const threats = status?.threatsIn ?? [];
   if (threats.length) {
     const summary = new Map();
-    for (const threat of threats) {
-      summary.set(threat.name, (summary.get(threat.name) ?? 0) + 1);
-    }
-    const parts = [...summary.entries()].map(([name, count]) => `${name} ×${count}`);
-    lines.push(`⚠️ У регіоні: ${parts.join(', ')}`);
+    for (const threat of threats) summary.set(threat.name, (summary.get(threat.name) ?? 0) + 1);
+    lines.push(`⚠️ У регіоні: ${[...summary.entries()].map(([n, c]) => `${n} ×${c}`).join(', ')}`);
   }
 
-  // Command form, not a sentence: building "тривога в <name>" would need the
-  // locative case ("в закарпатській області"), and a nominative name dropped
-  // into that slot reads as broken Ukrainian.
   lines.push(`🗺 Мапа: /map ${region.name}`);
   return lines.join('\n');
+}
+
+const threatWhere = ({ stage, threat }) => {
+  if (stage === 'in') return threat.locality ? `над ${threat.locality}` : 'у регіоні';
+  const dir = threat.direction ? ` на ${threat.direction}` : '';
+  const course = threat.headingWord ? `, курс ${threat.headingWord}` : '';
+  const place = threat.locality ? ` · ${threat.locality}` : '';
+  return `~${threat.distanceKm} км${dir}${course}${place}`;
+};
+
+/**
+ * Ukrainian text for one or more live threat events in a region. A single
+ * missile is one urgent line; several at once are summarised so a raid is one
+ * message per region per tick, not a burst.
+ */
+export function formatThreatNotification({ region, events }) {
+  // Urgency marker, distinct from the threat's own type emoji (so a missile
+  // isn't "🚀 🚀"): 🚨 once something is overhead, ⚠️ while it's inbound.
+  const anyIn = events.some((e) => e.stage === 'in');
+  const head = anyIn ? '🚨' : '⚠️';
+
+  if (events.length === 1) {
+    const e = events[0];
+    // "in" already reads "над <locality>"; don't prefix it again.
+    const detail = e.stage === 'in' ? threatWhere(e) : `наближається: ${threatWhere(e)}`;
+    return [
+      `${head} ${e.threat.emoji} ${e.threat.name} — ${region.name}`,
+      detail,
+      `🗺 Мапа: /map ${region.name}`,
+    ].join('\n');
+  }
+
+  const lines = [`${head} ${region.name}: ${events.length} ${pluralTargets(events.length)}`];
+  for (const e of events.slice(0, 6)) {
+    lines.push(`• ${e.threat.emoji} ${e.threat.name} — ${threatWhere(e)}`);
+  }
+  if (events.length > 6) lines.push(`…та ще ${events.length - 6}`);
+  lines.push(`🗺 Мапа: /map ${region.name}`);
+  return lines.join('\n');
+}
+
+function pluralTargets(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'ціль';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return 'цілі';
+  return 'цілей';
 }
