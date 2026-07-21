@@ -686,17 +686,20 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
 }
 
 function buildCaption(typeMeta, alerts, date) {
-  const lines = [];
-  lines.push('🗺 NEPTUN — Карта загроз України');
+  // Blocks joined by a blank line — one comma-joined blob of threat types was
+  // the hard-to-scan part. One type per line reads at a glance.
+  const blocks = ['🗺 NEPTUN — Карта загроз України'];
 
   const types = Object.keys(typeMeta);
   if (types.length > 0) {
-    const summary = types
-      .map((type) => `${typeMeta[type].emoji} ${typeMeta[type].name} ×${typeMeta[type].count}`)
-      .join(', ');
-    lines.push(`⚠️ Загрози: ${summary}`);
+    const lines = ['⚠️ Загрози в небі'];
+    for (const type of types) {
+      const meta = typeMeta[type];
+      lines.push(`• ${meta.emoji} ${meta.name} ×${meta.count}`);
+    }
+    blocks.push(lines.join('\n'));
   } else {
-    lines.push('✅ Активних загроз не виявлено');
+    blocks.push('✅ Активних загроз не виявлено');
   }
 
   const oblastCount = (alerts.oblasts ?? []).length;
@@ -705,13 +708,13 @@ function buildCaption(typeMeta, alerts, date) {
     const parts = [];
     if (oblastCount > 0) parts.push(`областей: ${oblastCount}`);
     if (raionCount > 0) parts.push(`районів: ${raionCount}`);
-    lines.push(`🔴 Тривога — ${parts.join(', ')}`);
+    blocks.push(`🔴 Тривога — ${parts.join(', ')}`);
   }
 
   const timeStr = date.toLocaleTimeString('uk-UA', {
     hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kyiv',
   });
-  lines.push(`🕐 ${timeStr} Kyiv  •  © neptun.in.ua`);
+  blocks.push(`🕐 ${timeStr} за Києвом · © neptun.in.ua`);
 
-  return lines.join('\n');
+  return blocks.join('\n\n');
 }
