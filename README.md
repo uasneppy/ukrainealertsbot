@@ -38,7 +38,7 @@ Telegram-бот, який показує актуальну карту пові�
 
 ## 🏠 Встановлення в CasaOS
 
-Готовий мультиарх-образ (`amd64` + `arm64`, працює і на Raspberry Pi) — на [Docker Hub](https://hub.docker.com/r/uasneppy/ukrainealertsbot). Покрокова інструкція: **[docs/INSTALL-CasaOS.md](docs/INSTALL-CasaOS.md)**. Маніфест для імпорту — [`casaos/docker-compose.yml`](casaos/docker-compose.yml).
+Готовий образ (`amd64`) — на [Docker Hub](https://hub.docker.com/r/uasneppy/ukrainealertsbot). Покрокова інструкція: **[docs/INSTALL-CasaOS.md](docs/INSTALL-CasaOS.md)**. Маніфест для імпорту — [`casaos/docker-compose.yml`](casaos/docker-compose.yml).
 
 ## 🐳 Запуск з готового образу
 

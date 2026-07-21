@@ -89,7 +89,6 @@ volumes:
 x-casaos:
   architectures:
     - amd64
-    - arm64
   main: ukrainealertsbot
   author: uasneppy
   developer: uasneppy
