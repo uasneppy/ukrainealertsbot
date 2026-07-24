@@ -74,11 +74,9 @@ export const MAP_COLORS = {
   cityLabel:          '#f2f7fd',
   threatLabel:        '#f4f8fc',  // marker text label (focused/region view)
 
-  // Markers sit on both the dark base map and saturated alert fills. A dark
-  // disc behind the icon keeps it legible on red, and a ring in the threat's
-  // own colour carries the type — the icon art alone can't, since user icons
-  // (icons/*.webp) are greyscale silhouettes that look alike at 40 px.
-  markerDisc:         '#0a1018',
+  // Marker icons carry their own colour and read on any fill via a drop-shadow;
+  // labels sit on a chip because a text-shadow can't hold against a saturated
+  // alert fill.
   labelChip:          'rgba(8,13,22,0.86)',
   labelChipBorder:    'rgba(122,160,200,0.35)',
 
@@ -264,20 +262,21 @@ function buildSkeletonHtml({ js, css }) {
     box-shadow: 0 1px 4px rgba(0,0,0,0.6);
   }
 
-  .threat-emoji { font-size: 24px; line-height: 26px; text-align: center; }
+  .threat-emoji {
+    font-size: 30px; line-height: 1; text-align: center;
+    filter: drop-shadow(0 1px 3px rgba(0,0,0,0.9));
+  }
   .threat-wrap { display: flex; flex-direction: column; align-items: center; }
 
-  /* Dark disc + type-coloured ring: legible on the dark base map and on a
-     red oblast fill alike, and the ring is what actually distinguishes a
-     БпЛА from a ракета at a glance. */
-  .threat-badge {
-    width: 38px; height: 38px; border-radius: 50%;
-    background: ${C.markerDisc};
-    display: flex; align-items: center; justify-content: center;
-    border: 2.5px solid #9aa7b5;
-    box-shadow: 0 0 0 1.5px rgba(6,10,18,0.9), 0 2px 8px rgba(0,0,0,0.75);
+  /* Bare icon — no disc, no ring. The icon carries its own colour (both the
+     built-in badges and user icons/*.webp are coloured), so the wrapper was
+     redundant and cluttered the map. A drop-shadow keeps it legible on a
+     saturated alert fill. */
+  .threat-icon { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; }
+  .threat-icon img {
+    width: 40px; height: 40px; object-fit: contain; display: block;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.95)) drop-shadow(0 0 3px rgba(0,0,0,0.55));
   }
-  .threat-badge img { width: 27px; height: 27px; object-fit: contain; display: block; }
 
   .threat-label {
     margin-top: 4px; font: 700 12px/1.2 sans-serif; color: ${C.threatLabel};
@@ -512,32 +511,29 @@ function _renderOnPage(payload) {
   });
 
   // 7. Threat markers. Every marker is a badge: a dark disc so the icon reads
-  //    on a red oblast fill, ringed in the threat's own colour so the type is
-  //    identifiable at a glance — the icon art can't do that on its own, since
-  //    user icons are greyscale silhouettes that look alike at this size.
-  //    In focused (region) mode the marker also carries a text label.
+  //    Just the icon — no disc or ring around it. The icon art carries its own
+  //    colour, so the wrapper only cluttered the map. In focused (region) mode
+  //    the marker also carries a text label.
   threats.forEach((t) => {
     if (typeof t.lat !== 'number' || typeof t.lon !== 'number' || !inView(t)) return;
     const meta = typeMeta[t.type] || {};
-    const color = meta.color || '#9aa7b5';
     const iconUrl = iconDataUrls[t.type] || iconDataUrls.unknown;
-    const inner = iconUrl
-      ? '<img src="' + iconUrl + '" alt="">'
+    const marker = iconUrl
+      ? '<div class="threat-icon"><img src="' + iconUrl + '" alt=""></div>'
       : '<div class="threat-emoji">' + (meta.emoji || '❓') + '</div>';
-    const badge = '<div class="threat-badge" style="border-color:' + color + '">' + inner + '</div>';
 
     const icon = t.label
       ? L.divIcon({
         className: '',
-        iconSize: [200, 70],
-        iconAnchor: [100, 19],
-        html: '<div class="threat-wrap">' + badge + '<div class="threat-label">' + t.label + '</div></div>',
+        iconSize: [200, 72],
+        iconAnchor: [100, 20],
+        html: '<div class="threat-wrap">' + marker + '<div class="threat-label">' + t.label + '</div></div>',
       })
       : L.divIcon({
         className: '',
-        iconSize: [38, 38],
-        iconAnchor: [19, 19],
-        html: badge,
+        iconSize: [40, 40],
+        iconAnchor: [20, 20],
+        html: marker,
       });
 
     L.marker([t.lat, t.lon], { interactive: false, keyboard: false, zIndexOffset: 1000, icon }).addTo(map);
@@ -593,7 +589,7 @@ function _renderOnPage(payload) {
   const grow = (r, p) => ({ left: r.left - p, top: r.top - p, right: r.right + p, bottom: r.bottom + p });
 
   const obstacles = [];
-  document.querySelectorAll('.threat-badge, .threat-label, .legend, .title-bar').forEach((el) => {
+  document.querySelectorAll('.threat-icon, .threat-emoji, .threat-label, .legend, .title-bar').forEach((el) => {
     obstacles.push(grow(el.getBoundingClientRect(), 3));
   });
 

@@ -81,10 +81,11 @@ message; announcing a raid is one per subscribed chat at once. Anything that
 fans out must be paced and retried — nobody re-asks for a notification they
 never knew was coming, so a swallowed 429 is a lost warning.
 
-**The map is read in a hurry, on a phone.** Markers carry their type in a
-coloured ring because the icon art can't (user icons are greyscale
-silhouettes). Labels sit on chips because they land on saturated alert fills as
-often as on the base map. City names are repositioned after render to dodge
+**The map is read in a hurry, on a phone.** Threat markers are the bare icon
+(no disc or ring) — the icon art carries its own colour, so a wrapper only
+cluttered the map; a drop-shadow keeps it legible on a saturated fill. Labels
+sit on chips because they land on saturated alert fills as often as on the base
+map. City names are repositioned after render to dodge
 markers and panels — Leaflet has no label collision, and a name occluded to
 "уми" is worse than one moved 20 px. Change any of this and re-render the three
 views (`mock`, a city, an oblast) before believing it looks right.
