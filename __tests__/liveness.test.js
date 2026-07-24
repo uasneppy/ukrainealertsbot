@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import { dataFingerprint } from '../bot.js';
-import { getState, hasSnapshot, streamAgeMs, __testables } from '../neptun/neptunStream.js';
+import { getState, hasSnapshot, streamAgeMs, onUpdate, __testables } from '../neptun/neptunStream.js';
 
 const raw = (obj) => Buffer.from(JSON.stringify(obj));
 
@@ -91,5 +91,26 @@ describe('neptunStream freshness', () => {
   it('unparseable payloads do not update the freshness clock', () => {
     __testables.handleMessage(Buffer.from('not-json'));
     expect(streamAgeMs()).toBe(Infinity);
+  });
+});
+
+describe('stream onUpdate', () => {
+  it('fires on state changes but not on heartbeat, and unsubscribes', async () => {
+    const { onUpdate, __testables } = await import('../neptun/neptunStream.js');
+    __testables.reset();
+    const cb = vi.fn();
+    const off = onUpdate(cb);
+
+    __testables.handleMessage(raw({ type: 'snapshot', data: { threats: [{ id: 'x', lat: 1, lon: 2 }] } }));
+    __testables.handleMessage(raw({ type: 'upsert', data: { id: 'y', lat: 3, lon: 4 } }));
+    __testables.handleMessage(raw({ type: 'alerts', data: { raions: ['r1'], oblasts: [] } }));
+    expect(cb).toHaveBeenCalledTimes(3);
+
+    __testables.handleMessage(raw({ type: 'heartbeat' }));
+    expect(cb).toHaveBeenCalledTimes(3); // heartbeat is not a state change
+
+    off();
+    __testables.handleMessage(raw({ type: 'remove', data: { id: 'y' } }));
+    expect(cb).toHaveBeenCalledTimes(3); // unsubscribed
   });
 });
