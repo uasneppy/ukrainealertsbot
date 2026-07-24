@@ -15,6 +15,8 @@
  *     server restart without FIN) never emit 'close', so without this the
  *     in-memory state silently freezes and the bot serves outdated maps.
  *   - streamAgeMs() exposes freshness so consumers can fall back to REST.
+ *   - onUpdate() notifies listeners the moment live state changes, so the alert
+ *     watcher can react in ~seconds instead of waiting for its next poll.
  */
 
 import WebSocket from 'ws';
@@ -72,6 +74,28 @@ export function streamAgeMs() {
   return _lastTrafficAt ? Date.now() - _lastTrafficAt : Infinity;
 }
 
+// Listeners notified when live state actually changes (not on heartbeat/pong).
+// The alert watcher uses this to react in near-real-time instead of waiting for
+// its next poll — the difference between telling someone a ballistic is inbound
+// now versus up to a poll-interval later.
+const _updateListeners = new Set();
+
+/** Subscribe to state-change events. Returns an unsubscribe function. */
+export function onUpdate(listener) {
+  _updateListeners.add(listener);
+  return () => _updateListeners.delete(listener);
+}
+
+function emitUpdate() {
+  for (const listener of _updateListeners) {
+    try {
+      listener();
+    } catch (err) {
+      console.error('[neptun-stream] update listener threw:', err?.message ?? err);
+    }
+  }
+}
+
 function handleMessage(raw) {
   let msg;
   try {
@@ -90,26 +114,30 @@ function handleMessage(raw) {
       for (const t of msg.data?.threats ?? []) {
         if (t?.id) _threats.set(t.id, t);
       }
+      emitUpdate();
       break;
     }
     case 'upsert': {
       const t = msg.data;
       if (t?.id) _threats.set(t.id, t);
+      emitUpdate();
       break;
     }
     case 'remove': {
       const id = msg.data?.id;
       if (id) _threats.delete(id);
+      emitUpdate();
       break;
     }
     case 'alerts': {
       _receivedSnapshot = true;
       _alerts.raions = msg.data?.raions ?? [];
       _alerts.oblasts = msg.data?.oblasts ?? [];
+      emitUpdate();
       break;
     }
     case 'heartbeat':
-      // keepalive — freshness clock already updated above
+      // keepalive — freshness clock already updated above, no state change
       break;
     default:
       console.log('[neptun-stream] Unknown message type:', msg.type);
@@ -213,5 +241,6 @@ export const __testables = {
     _alerts.oblasts = [];
     _receivedSnapshot = false;
     _lastTrafficAt = 0;
+    _updateListeners.clear();
   },
 };

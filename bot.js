@@ -16,7 +16,7 @@ import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js
 import { getOrLaunchBrowser, closeBrowser } from './neptun/browser.js';
 import { renderNeptunMap, buildNationalReport, renderQueueStats } from './neptun/mapRenderer.js';
 import { fetchSnapshot } from './neptun/neptunApi.js';
-import { startStream, stopStream, getState, hasSnapshot, streamAgeMs } from './neptun/neptunStream.js';
+import { startStream, stopStream, getState, hasSnapshot, streamAgeMs, onUpdate as onStreamUpdate } from './neptun/neptunStream.js';
 import { getGeoData, geoCacheAgeMs } from './neptun/fetchGeo.js';
 import {
   loadSubscriptions,
@@ -512,10 +512,12 @@ if (token && !isTestEnv) {
       : rawTypes.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   }
   const liveAlertKm = Number(process.env.LIVE_ALERT_KM) || undefined;
+  const watcherIntervalMs = Number(process.env.WATCHER_INTERVAL_MS) || undefined;
 
   const alertWatcher = createAlertWatcher({
     initialStates: persistedAlertState,
     onStateChange: recordAlertState,
+    ...(watcherIntervalMs ? { intervalMs: watcherIntervalMs } : {}),
     // Same authority as the maps: notifications and pictures must never
     // disagree. null when nothing trustworthy is available, so the tick skips.
     getSnapshot: () => liveSnapshot.getOrNull(),
@@ -545,6 +547,9 @@ if (token && !isTestEnv) {
       // watcher is constructed before this async pre-warm finishes.
       Object.assign(persistedAlertState, alertState);
       alertWatcher.start();
+      // Near-real-time: react the moment the stream reports a changed threat or
+      // alert, instead of only on the periodic poll. wake() coalesces bursts.
+      onStreamUpdate(() => alertWatcher.wake());
       getLiveNeptunMap().catch((err) =>
         console.error('[startup] Map warm-up failed:', err?.message ?? err)
       );

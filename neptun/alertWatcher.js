@@ -32,7 +32,15 @@ import { subscribedRegions } from './subscriptions.js';
 export const DEFAULT_CONFIRM_ON_MS = 0;
 /** All-clear: must hold this long, so a flapping feed can't sound the retreat. */
 export const DEFAULT_CONFIRM_OFF_MS = 60_000;
-export const DEFAULT_INTERVAL_MS = 20_000;
+/**
+ * Safety-net poll. The fast path is wake() — the stream nudges the watcher the
+ * moment a threat changes — so this only has to catch changes the stream can't
+ * signal (e.g. an alert flip the API shows but the socket missed). Kept short so
+ * even that path is timely.
+ */
+export const DEFAULT_INTERVAL_MS = 8_000;
+/** wake() coalesces bursts: at most one triggered tick this often. */
+export const DEFAULT_MIN_TICK_GAP_MS = 2_500;
 
 /**
  * How old persisted state may be and still be worth reconciling against. After
@@ -66,6 +74,7 @@ export function createAlertWatcher({
   confirmOnMs = DEFAULT_CONFIRM_ON_MS,
   confirmOffMs = DEFAULT_CONFIRM_OFF_MS,
   intervalMs = DEFAULT_INTERVAL_MS,
+  minTickGapMs = DEFAULT_MIN_TICK_GAP_MS,
   initialStates = null,
   onStateChange = null,
   staleStateMs = DEFAULT_STALE_STATE_MS,
@@ -81,6 +90,9 @@ export function createAlertWatcher({
   /** cacheKey → { confirmed, candidate, candidateSince, threats: Map<id, stage> } */
   const states = new Map();
   let timer = null;
+  let ticking = false;   // re-entrancy guard: periodic + wake() must not overlap
+  let lastTickAt = 0;
+  let wakeTimer = null;
 
   /**
    * Reconciles the tracked high-priority threats for a region against the
@@ -119,7 +131,7 @@ export function createAlertWatcher({
     return events;
   }
 
-  async function tick() {
+  async function runTick() {
     const regions = listRegions();
     if (!regions.length) return { skipped: 'no-subscribers', announced: [] };
 
@@ -193,8 +205,40 @@ export function createAlertWatcher({
     return { skipped: null, announced };
   }
 
+  /**
+   * Runs one tick, but never overlapping another. The periodic timer and wake()
+   * both call this; a tick that arrives while one is in flight is dropped (the
+   * running one already reflects the latest state by the time it reads it).
+   */
+  async function tick() {
+    if (ticking) return { skipped: 'busy', announced: [] };
+    ticking = true;
+    lastTickAt = now();
+    try {
+      return await runTick();
+    } finally {
+      ticking = false;
+    }
+  }
+
+  /**
+   * Nudge the watcher to check soon — called when the stream reports changed
+   * state. Coalesced to at most one triggered tick per minTickGapMs so a burst
+   * of upserts during a raid doesn't become a burst of REST fetches.
+   */
+  function wake() {
+    if (wakeTimer) return; // one already scheduled — it'll pick up the latest
+    const delay = Math.max(0, minTickGapMs - (now() - lastTickAt));
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null;
+      tick().catch((err) => console.error('[alert-watcher] wake tick failed:', err?.message ?? err));
+    }, delay);
+    wakeTimer.unref?.();
+  }
+
   return {
     tick,
+    wake,
     snapshotStates: () => new Map([...states].map(([k, v]) => [k, { ...v, threats: new Map(v.threats) }])),
     start() {
       if (timer) return;
@@ -207,6 +251,10 @@ export function createAlertWatcher({
       if (timer) {
         clearInterval(timer);
         timer = null;
+      }
+      if (wakeTimer) {
+        clearTimeout(wakeTimer);
+        wakeTimer = null;
       }
     },
   };

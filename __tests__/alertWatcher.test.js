@@ -487,3 +487,65 @@ describe('formatThreatNotification', () => {
     expect(five).toContain('5 цілей');
   });
 });
+
+describe('wake() and re-entrancy (faster reaction)', () => {
+  it('coalesces a burst of wakes into a single tick', async () => {
+    vi.useFakeTimers();
+    try {
+      const getSnapshot = vi.fn(async () => ({ threats: [], alerts: alertsFor() }));
+      const watcher = createAlertWatcher({
+        getSnapshot, getGeo: async () => GEO, notify: vi.fn(),
+        listRegions: () => [{ region: KYIV_OBLAST, chatIds: ['1'] }],
+        minTickGapMs: 2_000,
+      });
+
+      watcher.wake(); watcher.wake(); watcher.wake(); // a burst of upserts
+      await vi.advanceTimersByTimeAsync(2_100);
+
+      expect(getSnapshot).toHaveBeenCalledTimes(1); // one tick, not three
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('throttles a wake that arrives right after a tick', async () => {
+    vi.useFakeTimers();
+    try {
+      const getSnapshot = vi.fn(async () => ({ threats: [], alerts: alertsFor() }));
+      const watcher = createAlertWatcher({
+        getSnapshot, getGeo: async () => GEO, notify: vi.fn(),
+        listRegions: () => [{ region: KYIV_OBLAST, chatIds: ['1'] }],
+        minTickGapMs: 2_000,
+      });
+
+      await watcher.tick();                 // establishes lastTickAt
+      expect(getSnapshot).toHaveBeenCalledTimes(1);
+
+      watcher.wake();                        // just after a tick → must wait
+      await vi.advanceTimersByTimeAsync(500);
+      expect(getSnapshot).toHaveBeenCalledTimes(1); // not yet
+      await vi.advanceTimersByTimeAsync(1_600);
+      expect(getSnapshot).toHaveBeenCalledTimes(2); // fired after the gap
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops an overlapping tick instead of running two at once', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const getSnapshot = vi.fn(async () => { await gate; return { threats: [], alerts: alertsFor() }; });
+    const watcher = createAlertWatcher({
+      getSnapshot, getGeo: async () => GEO, notify: vi.fn(),
+      listRegions: () => [{ region: KYIV_OBLAST, chatIds: ['1'] }],
+    });
+
+    const first = watcher.tick();            // starts, blocks on the gate
+    const second = await watcher.tick();     // arrives mid-flight
+    expect(second).toMatchObject({ skipped: 'busy' });
+
+    release();
+    await first;
+    expect(getSnapshot).toHaveBeenCalledTimes(1); // the busy one never fetched
+  });
+});
