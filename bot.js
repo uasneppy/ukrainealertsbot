@@ -36,7 +36,7 @@ import {
   flushAlertState,
 } from './neptun/alertState.js';
 import { createSender } from './telegramSender.js';
-import { createSnapshotSource } from './neptun/liveState.js';
+import { createSnapshotSource, createWatcherSource } from './neptun/liveState.js';
 import { createFrameCache } from './neptun/frameCache.js';
 
 dotenv.config();
@@ -253,6 +253,16 @@ const liveSnapshot = createSnapshotSource({
 async function getNeptunMapData() {
   return liveSnapshot.get();
 }
+
+// The alert watcher reads the freshest source (live stream first), not the
+// authoritative-but-laggier REST the maps use — a notification is a race the
+// stream wins. See createWatcherSource.
+const watcherSnapshot = createWatcherSource({
+  apiSource: liveSnapshot,
+  getState,
+  hasSnapshot,
+  streamAgeMs,
+});
 
 const jsonCompare = (a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b));
 
@@ -513,14 +523,19 @@ if (token && !isTestEnv) {
   }
   const liveAlertKm = Number(process.env.LIVE_ALERT_KM) || undefined;
   const watcherIntervalMs = Number(process.env.WATCHER_INTERVAL_MS) || undefined;
+  // How long an all-clear must hold before it's announced (flap guard). Lower =
+  // faster "відбій", at the cost of a bigger chance of a premature one.
+  const confirmOffMs = Number(process.env.CONFIRM_OFF_MS) || undefined;
 
   const alertWatcher = createAlertWatcher({
     initialStates: persistedAlertState,
     onStateChange: recordAlertState,
     ...(watcherIntervalMs ? { intervalMs: watcherIntervalMs } : {}),
-    // Same authority as the maps: notifications and pictures must never
-    // disagree. null when nothing trustworthy is available, so the tick skips.
-    getSnapshot: () => liveSnapshot.getOrNull(),
+    ...(confirmOffMs ? { confirmOffMs } : {}),
+    // Freshest-first: the live stream while it's fresh (a missile is on it the
+    // instant NEPTUN sees it), reconciled against REST periodically. null when
+    // nothing trustworthy is available, so the tick skips.
+    getSnapshot: () => watcherSnapshot.get(),
     getGeo: getGeoData,
     ...(liveAlertTypes ? { liveAlertTypes } : {}),
     ...(liveAlertKm ? { liveAlertKm } : {}),

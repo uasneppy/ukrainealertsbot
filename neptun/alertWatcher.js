@@ -30,8 +30,14 @@ import { subscribedRegions } from './subscriptions.js';
 
 /** Alert start: announced as soon as it is observed. */
 export const DEFAULT_CONFIRM_ON_MS = 0;
-/** All-clear: must hold this long, so a flapping feed can't sound the retreat. */
-export const DEFAULT_CONFIRM_OFF_MS = 60_000;
+/**
+ * All-clear: must hold this long before it's announced, so a feed that briefly
+ * flaps off-then-on doesn't sound the retreat. A premature "відбій" is the
+ * costly mistake, so this stays non-zero — but 30 s balances that against not
+ * making people wait a minute-plus for a real all-clear. Tunable via
+ * CONFIRM_OFF_MS.
+ */
+export const DEFAULT_CONFIRM_OFF_MS = 30_000;
 /**
  * Safety-net poll. The fast path is wake() — the stream nudges the watcher the
  * moment a threat changes — so this only has to catch changes the stream can't
@@ -39,8 +45,12 @@ export const DEFAULT_CONFIRM_OFF_MS = 60_000;
  * even that path is timely.
  */
 export const DEFAULT_INTERVAL_MS = 8_000;
-/** wake() coalesces bursts: at most one triggered tick this often. */
-export const DEFAULT_MIN_TICK_GAP_MS = 2_500;
+/**
+ * wake() coalesces bursts: at most one triggered tick this often. Kept short
+ * because a stream-backed tick is cheap (no network) — the point is only to
+ * fold a flurry of upserts into one check.
+ */
+export const DEFAULT_MIN_TICK_GAP_MS = 1_500;
 
 /**
  * How old persisted state may be and still be worth reconciling against. After

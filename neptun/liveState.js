@@ -83,3 +83,62 @@ export function createSnapshotSource({
 
   return { get, getOrNull };
 }
+
+/**
+ * Freshest-first source for the *alert watcher* — the opposite priority to the
+ * map source above.
+ *
+ * A map is a user asking "what's true right now", so it reads authoritative
+ * REST. A notification is a race: a missile is on the WebSocket the instant
+ * NEPTUN sees it, while the REST snapshot can lag it by seconds. Being a few
+ * seconds late on "ballistic inbound" is the failure the operator reported, so
+ * the watcher reads the live stream while it's fresh.
+ *
+ * The safety valve is a periodic reconcile against REST (every reconcileMs):
+ * the stream's `alerts` message is a full replacement, but if the socket ever
+ * dropped one, the stream would sit on a stale alert state — so at least that
+ * often, and whenever the stream is quiet, we read authoritative REST instead.
+ * That bounds a missed "відбій" to reconcileMs rather than "until the socket
+ * reconnects".
+ */
+export function createWatcherSource({
+  apiSource,
+  getState,
+  hasSnapshot,
+  streamAgeMs,
+  freshMs = 45_000,
+  reconcileMs = 30_000,
+  now = () => Date.now(),
+} = {}) {
+  if (!apiSource || typeof apiSource.getOrNull !== 'function') {
+    throw new Error('apiSource with getOrNull is required');
+  }
+  if (typeof getState !== 'function') throw new Error('getState is required');
+  if (typeof hasSnapshot !== 'function') throw new Error('hasSnapshot is required');
+  if (typeof streamAgeMs !== 'function') throw new Error('streamAgeMs is required');
+
+  let lastReconcileAt = 0;
+  const fromStream = () => {
+    const s = getState();
+    return { threats: s?.threats ?? [], alerts: s?.alerts ?? { oblasts: [], raions: [] } };
+  };
+
+  async function get() {
+    const streamFresh = hasSnapshot() && streamAgeMs() < freshMs;
+    const reconcileDue = now() - lastReconcileAt >= reconcileMs;
+
+    if (streamFresh && !reconcileDue) return fromStream();
+
+    // Reconcile against authoritative REST — or it's our only option because the
+    // stream is quiet/down.
+    const rest = await apiSource.getOrNull();
+    if (rest) {
+      lastReconcileAt = now();
+      return rest;
+    }
+    // REST failed. A fresh stream still beats nothing; otherwise skip the tick.
+    return streamFresh ? fromStream() : null;
+  }
+
+  return { get };
+}
