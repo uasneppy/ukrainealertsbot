@@ -22,18 +22,24 @@ export const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
  */
 export async function fetchWithTimeout(
   url,
-  { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, fetchFn = globalThis.fetch, ...init } = {}
+  { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, fetchFn = globalThis.fetch, signal, ...init } = {}
 ) {
   if (typeof fetchFn !== 'function') {
     throw new Error('fetchFn must be a function');
   }
 
+  // A caller-supplied signal composes with the deadline rather than being
+  // silently replaced by it — either one aborts the request.
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const composedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
   try {
-    return await fetchFn(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    return await fetchFn(url, { ...init, signal: composedSignal });
   } catch (error) {
-    // Node throws TimeoutError for AbortSignal.timeout; AbortError covers
-    // callers that pass their own signal through `init`.
-    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+    // Node throws TimeoutError for AbortSignal.timeout (AbortSignal.any
+    // propagates it as the abort reason). A caller's own abort keeps its
+    // original error — that one wasn't a timeout.
+    if (error?.name === 'TimeoutError' || (error?.name === 'AbortError' && !signal?.aborted)) {
       throw new Error(`Request to ${url} timed out after ${timeoutMs} ms`);
     }
     throw error;

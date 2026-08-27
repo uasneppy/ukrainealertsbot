@@ -38,6 +38,14 @@ describe('channelMessages utilities', () => {
     it('throws when provided value is not a string', () => {
       expect(() => cleanMessageText(null)).toThrow('rawHtml must be a string');
     });
+
+    it('survives numeric entities outside the Unicode range', () => {
+      // Scraped, untrusted HTML: fromCodePoint throws past 0x10FFFF, and one
+      // malformed entity must not take down the whole channel fetch.
+      expect(cleanMessageText('до &#1114112; після')).toBe('до &#1114112; після');
+      expect(cleanMessageText('до &#x110000; після')).toBe('до &#x110000; після');
+      expect(cleanMessageText('ок: &#x1F680;')).toBe('ок: 🚀');
+    });
   });
 
   describe('extractMessageContents', () => {

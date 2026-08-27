@@ -176,10 +176,19 @@ export function createAlertWatcher({
         states.set(region.cacheKey, state);
 
         if (usable && remembered.confirmed !== active) {
-          // Changed while we were down — a deploy during a raid. The one case
-          // where the first tick must speak.
-          onStateChange?.(region.cacheKey, active, t);
-          announced.push({ kind: 'alert', region, chatIds, active, status, missedWhileDown: true });
+          if (active) {
+            // Тривога began while we were down — a deploy during a raid. The
+            // one case where the first tick must speak, and speak at once.
+            onStateChange?.(region.cacheKey, active, t);
+            announced.push({ kind: 'alert', region, chatIds, active, status, missedWhileDown: true });
+          } else {
+            // Відбій while we were down. Even here it must survive the
+            // confirmOffMs hold: the first read after boot is exactly when a
+            // flapping feed or a half-warm stream is most likely, and a
+            // premature all-clear is the costly mistake. Seed the old
+            // confirmed state and let the normal hold logic announce it.
+            state.confirmed = true;
+          }
         } else if (!usable) {
           onStateChange?.(region.cacheKey, active, t);
         }

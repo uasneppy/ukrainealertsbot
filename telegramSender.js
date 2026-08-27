@@ -16,6 +16,14 @@
 /** ~25 msg/s — comfortably under Telegram's global ceiling. */
 export const DEFAULT_MIN_INTERVAL_MS = 40;
 export const DEFAULT_MAX_RETRIES = 3;
+/**
+ * Total flood-wait (429 retry_after) honoured per message. 429s are the
+ * expected shape of a fan-out and carry the server's own schedule, so they
+ * don't burn the retry budget meant for transient errors — but the queue is
+ * serial, so one chat stuck in endless flood-waits must not wedge everyone
+ * behind it forever. This bounds that.
+ */
+export const DEFAULT_MAX_FLOOD_WAIT_MS = 60_000;
 
 /**
  * Telegram's flood-wait, in ms, or null if this isn't one.
@@ -70,6 +78,7 @@ export function createSender({
   onDeadChat = null,
   minIntervalMs = DEFAULT_MIN_INTERVAL_MS,
   maxRetries = DEFAULT_MAX_RETRIES,
+  maxFloodWaitMs = DEFAULT_MAX_FLOOD_WAIT_MS,
   sleep = defaultSleep,
   now = () => Date.now(),
   log = console,
@@ -81,7 +90,9 @@ export function createSender({
   let queued = 0;
 
   async function deliver(chatId, text) {
-    for (let attempt = 0; ; attempt += 1) {
+    let attempt = 0;
+    let floodWaitedMs = 0;
+    for (;;) {
       const since = now() - lastSentAt;
       if (since < minIntervalMs) await sleep(minIntervalMs - since);
 
@@ -100,15 +111,32 @@ export function createSender({
           return 'dropped';
         }
 
+        // Flood-waits are honoured outside the retry budget: a 429 during a
+        // fan-out is expected, and these are exactly the messages that must
+        // not be dropped after three dutiful waits. Bounded by total waited
+        // time instead (see DEFAULT_MAX_FLOOD_WAIT_MS).
+        const floodWait = retryAfterMs(err);
+        if (floodWait != null) {
+          // A floor under retry_after: a server that answers retry_after=0 in
+          // a loop must still consume the budget, not spin forever.
+          const wait = Math.max(floodWait, minIntervalMs);
+          floodWaitedMs += wait;
+          if (floodWaitedMs > maxFloodWaitMs) {
+            log.error?.(`[sender] giving up on ${chatId} after ${floodWaitedMs} ms of flood waits`);
+            return 'failed';
+          }
+          await sleep(wait);
+          continue;
+        }
+
         if (attempt >= maxRetries) {
           log.error?.(`[sender] giving up on ${chatId}: ${err?.message ?? err}`);
           return 'failed';
         }
 
-        // Honour the server's own back-off when it gave one; otherwise a
-        // short exponential wait for transient network trouble.
-        const wait = retryAfterMs(err) ?? minIntervalMs * 2 ** attempt;
-        await sleep(wait);
+        // Short exponential back-off for transient network trouble.
+        await sleep(minIntervalMs * 2 ** attempt);
+        attempt += 1;
       }
     }
   }

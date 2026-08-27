@@ -21,7 +21,9 @@ const decodeHtmlEntities = (value) =>
     if (entity[0] === '#') {
       const isHex = entity[1]?.toLowerCase() === 'x';
       const code = parseInt(entity.slice(isHex ? 2 : 1), isHex ? 16 : 10);
-      if (!Number.isNaN(code)) {
+      // fromCodePoint throws past 0x10FFFF — this is scraped, untrusted HTML,
+      // and one malformed entity must not take down the whole channel fetch.
+      if (!Number.isNaN(code) && code >= 0 && code <= 0x10ffff) {
         return String.fromCodePoint(code);
       }
       return match;

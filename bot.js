@@ -3,8 +3,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import TelegramBot from 'node-telegram-bot-api';
-import puppeteer from 'puppeteer';
-import chromium from '@sparticuz/chromium';
 import dotenv from 'dotenv';
 
 import { fetchLatestChannelMessages, formatChannelMessages } from './channelMessages.js';
@@ -45,173 +43,7 @@ const token = process.env.BOT_TOKEN;
 const isTestEnv = process.env.NODE_ENV === 'test';
 if (!token && !isTestEnv) throw new Error('BOT_TOKEN is required');
 
-// ── resolveLaunchOptions — kept here for backward-compat with existing tests ──
-
-const createFallbackLaunchOptions = () => ({
-  headless: 'new',
-  args: ['--no-sandbox', '--disable-setuid-sandbox'],
-});
-
-export const resolveLaunchOptions = async () => {
-  const manualPath = process.env.CHROME_EXECUTABLE_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
-  const fallback = createFallbackLaunchOptions();
-
-  if (manualPath) {
-    return { ...fallback, executablePath: manualPath };
-  }
-
-  try {
-    const executablePath = await chromium.executablePath();
-    if (!executablePath) return fallback;
-    return {
-      args: Array.isArray(chromium.args) && chromium.args.length ? [...chromium.args] : fallback.args,
-      headless: typeof chromium.headless === 'boolean' ? chromium.headless : fallback.headless,
-      executablePath,
-    };
-  } catch {
-    return fallback;
-  }
-};
-
-// ── Viewport / screenshot utilities — exported for tests ─────────────────────
-
-export const TARGET_VIEWPORT = Object.freeze({ width: 1280, height: 800, deviceScaleFactor: 1 });
-export const DEFAULT_CROP_PADDING = 70;
-export const ALERT_CANVAS_SELECTORS = Object.freeze([
-  '#alerts-map canvas',
-  '.mapboxgl-canvas',
-  'canvas',
-]);
-export const CHANNEL_MESSAGE_TRIGGER = 'чому тривога';
 export const CHANNEL_MESSAGE_LIMIT = 20;
-
-export async function applyViewport(page, viewport = TARGET_VIEWPORT) {
-  if (!page || typeof page.setViewport !== 'function') {
-    throw new Error('A Puppeteer page with setViewport is required');
-  }
-
-  if (!viewport || typeof viewport !== 'object') {
-    throw new Error('A viewport object is required');
-  }
-
-  const { width, height, deviceScaleFactor = 1 } = viewport;
-
-  if (!Number.isFinite(width) || !Number.isFinite(height)) {
-    throw new Error('Viewport width and height must be finite numbers');
-  }
-
-  await page.setViewport({ width, height, deviceScaleFactor });
-}
-
-export async function captureCroppedScreenshot(page, padding = DEFAULT_CROP_PADDING, type = 'png') {
-  if (!page || typeof page.screenshot !== 'function' || typeof page.viewport !== 'function') {
-    throw new Error('A Puppeteer page with viewport and screenshot is required');
-  }
-
-  if (!Number.isFinite(padding) || padding < 0) {
-    throw new Error('Padding must be a non-negative finite number');
-  }
-
-  const viewport = page.viewport();
-  if (!viewport || !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height)) {
-    throw new Error('A viewport with finite width and height is required before taking screenshots');
-  }
-
-  const clipWidth = viewport.width - padding * 2;
-  const clipHeight = viewport.height - padding * 2;
-
-  if (clipWidth <= 0 || clipHeight <= 0) {
-    throw new Error('Padding is too large for the current viewport dimensions');
-  }
-
-  return page.screenshot({
-    type,
-    clip: {
-      x: padding,
-      y: padding,
-      width: clipWidth,
-      height: clipHeight,
-    },
-  });
-}
-
-export function generateCanvasDataUrl(root, selectors) {
-  if (!root || typeof root.querySelector !== 'function') {
-    throw new Error('A root with querySelector is required');
-  }
-
-  if (!Array.isArray(selectors) || !selectors.length) {
-    throw new Error('A non-empty selectors array is required');
-  }
-
-  for (const selector of selectors) {
-    const candidate = typeof selector === 'string' ? root.querySelector(selector) : null;
-    if (candidate && typeof candidate.toDataURL === 'function') {
-      return candidate.toDataURL('image/png');
-    }
-  }
-
-  return null;
-}
-
-export async function waitForAnySelector(page, selectors = ALERT_CANVAS_SELECTORS, options = {}) {
-  if (!page || typeof page.waitForFunction !== 'function') {
-    throw new Error('A Puppeteer page with waitForFunction is required');
-  }
-
-  if (!Array.isArray(selectors) || !selectors.length) {
-    throw new Error('A non-empty selectors array is required');
-  }
-
-  try {
-    await page.waitForFunction(
-      (targetSelectors) => targetSelectors.some((selector) => document.querySelector(selector)),
-      options,
-      selectors
-    );
-    return true;
-  } catch (error) {
-    if (error?.name === 'TimeoutError') {
-      return false;
-    }
-    throw error;
-  }
-}
-
-export function isolateMapLayout(root, selector) {
-  if (!root || typeof root.querySelector !== 'function') {
-    throw new Error('A root with querySelector is required');
-  }
-
-  if (typeof selector !== 'string' || !selector.trim()) {
-    throw new Error('A map selector string is required');
-  }
-
-  const mapElement = root.querySelector(selector);
-  if (!mapElement) {
-    return false;
-  }
-
-  const siblings = Array.isArray(root.body?.children) ? root.body.children : [];
-  siblings.forEach((child) => {
-    if (child !== mapElement && child?.style) {
-      child.style.display = 'none';
-    }
-  });
-
-  if (mapElement.style) {
-    mapElement.style.position = 'absolute';
-    mapElement.style.inset = '0';
-    mapElement.style.width = '100%';
-    mapElement.style.height = '100%';
-  }
-
-  if (typeof mapElement.scrollIntoView === 'function') {
-    mapElement.scrollIntoView({ block: 'start', inline: 'start' });
-  }
-
-  return true;
-}
 
 export async function handleChannelMessageRequest({
   botInstance,
@@ -309,7 +141,7 @@ async function getLiveNeptunMap() {
 
 const ANALYSIS_TTL_MS = 120_000;
 let analysisCache = { text: null, fp: null, takenAt: 0 };
-let analysisInFlight = null;
+let analysisInFlight = null; // { fp, promise }
 
 async function getLiveAnalysis() {
   const messages = await fetchLatestChannelMessages({ limit: CHANNEL_MESSAGE_LIMIT });
@@ -318,17 +150,21 @@ async function getLiveAnalysis() {
   if (cached.text && cached.fp === fp && Date.now() - cached.takenAt < ANALYSIS_TTL_MS) {
     return cached.text;
   }
-  if (analysisInFlight) return analysisInFlight;
-  analysisInFlight = (async () => {
+  // Join an in-flight call only when it is analysing the same messages — the
+  // same rule frameCache enforces for renders. Joining on "a call is running"
+  // alone would hand a caller holding a fresher feed the older answer.
+  if (analysisInFlight?.fp === fp) return analysisInFlight.promise;
+  const promise = (async () => {
     try {
       const text = await analyzeAlertMessages(messages);
       analysisCache = { text, fp, takenAt: Date.now() };
       return text;
     } finally {
-      analysisInFlight = null;
+      if (analysisInFlight?.fp === fp) analysisInFlight = null;
     }
   })();
-  return analysisInFlight;
+  analysisInFlight = { fp, promise };
+  return promise;
 }
 
 // ── Region-scoped queries ─────────────────────────────────────────────────────
@@ -363,21 +199,27 @@ function regionMarkup(chatId, region) {
   return mapKeyboard({ cacheKey: region.cacheKey, subscribed });
 }
 
+/**
+ * Renders a region frame, reusing the cached one while the data fingerprint is
+ * unchanged. Shared by the message path (sendRegionMap) and the 🔄 refresh
+ * button, so both get the same fingerprint-gated reuse.
+ */
+async function renderRegionFrame(region, { threats, alerts, geo, fp }) {
+  const cached = regionMapCache.get(region.cacheKey);
+  if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_MAP_REUSE_MS) {
+    return { buffer: cached.buffer, caption: cached.caption };
+  }
+  const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
+  setCacheEntry(regionMapCache, region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
+  return { buffer, caption };
+}
+
 async function sendRegionMap(botInstance, chatId, region) {
   botInstance.sendChatAction(chatId, 'upload_photo').catch(() => {});
   const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
   const fp = dataFingerprint({ threats, alerts });
-  const cached = regionMapCache.get(region.cacheKey);
-  if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_MAP_REUSE_MS) {
-    await botInstance.sendPhoto(chatId, cached.buffer, {
-      caption: cached.caption ?? undefined,
-      reply_markup: regionMarkup(chatId, region),
-    });
-    return;
-  }
   try {
-    const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
-    setCacheEntry(regionMapCache, region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
+    const { buffer, caption } = await renderRegionFrame(region, { threats, alerts, geo, fp });
     await botInstance.sendPhoto(chatId, buffer, {
       caption: caption ?? undefined,
       reply_markup: regionMarkup(chatId, region),
@@ -445,6 +287,9 @@ async function sendRegionWhy(botInstance, chatId, region, userQuery) {
 // a command reads as a broken bot.
 
 export const CHAT_COOLDOWN_MS = 20_000;
+/** Refresh-button damping — shorter than the message cooldown: a tap is a
+ * deliberate request, it just must not become a render per tap. */
+export const CALLBACK_REFRESH_COOLDOWN_MS = 5_000;
 const lastReplyAt = new Map(); // "chatId:kind" → epoch ms
 
 export function isOnCooldown(key, now = Date.now(), cooldownMs = CHAT_COOLDOWN_MS) {
@@ -452,6 +297,16 @@ export function isOnCooldown(key, now = Date.now(), cooldownMs = CHAT_COOLDOWN_M
   if (now - last < cooldownMs) return true;
   setCacheEntry(lastReplyAt, key, now, 500);
   return false;
+}
+
+/**
+ * Releases a consumed cooldown slot. The slot is taken before the reply is
+ * attempted, so when the attempt ends in an apology instead of an answer the
+ * user's retry seconds later must not be silently swallowed — the cooldown
+ * exists to damp repetition of answers, not repetition of failures.
+ */
+export function clearCooldown(key) {
+  lastReplyAt.delete(key);
 }
 
 // ── Subscription replies ──────────────────────────────────────────────────────
@@ -521,24 +376,33 @@ if (token && !isTestEnv) {
       ? []
       : rawTypes.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   }
-  const liveAlertKm = Number(process.env.LIVE_ALERT_KM) || undefined;
-  const watcherIntervalMs = Number(process.env.WATCHER_INTERVAL_MS) || undefined;
+  // `Number(x) || undefined` would turn an explicit 0 into "unset" — and 0 is a
+  // meaningful value for these knobs (CONFIRM_OFF_MS=0 = announce відбій at
+  // once). Empty/absent/garbage → undefined → the watcher's default.
+  const numEnv = (name) => {
+    const raw = (process.env[name] ?? '').trim();
+    if (!raw) return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : undefined;
+  };
+  const liveAlertKm = numEnv('LIVE_ALERT_KM');
+  const watcherIntervalMs = numEnv('WATCHER_INTERVAL_MS');
   // How long an all-clear must hold before it's announced (flap guard). Lower =
   // faster "відбій", at the cost of a bigger chance of a premature one.
-  const confirmOffMs = Number(process.env.CONFIRM_OFF_MS) || undefined;
+  const confirmOffMs = numEnv('CONFIRM_OFF_MS');
 
   const alertWatcher = createAlertWatcher({
     initialStates: persistedAlertState,
     onStateChange: recordAlertState,
-    ...(watcherIntervalMs ? { intervalMs: watcherIntervalMs } : {}),
-    ...(confirmOffMs ? { confirmOffMs } : {}),
+    ...(watcherIntervalMs !== undefined ? { intervalMs: watcherIntervalMs } : {}),
+    ...(confirmOffMs !== undefined ? { confirmOffMs } : {}),
     // Freshest-first: the live stream while it's fresh (a missile is on it the
     // instant NEPTUN sees it), reconciled against REST periodically. null when
     // nothing trustworthy is available, so the tick skips.
     getSnapshot: () => watcherSnapshot.get(),
     getGeo: getGeoData,
     ...(liveAlertTypes ? { liveAlertTypes } : {}),
-    ...(liveAlertKm ? { liveAlertKm } : {}),
+    ...(liveAlertKm !== undefined ? { liveAlertKm } : {}),
     // Enqueue and return: the tick must not sit waiting on a fan-out that is
     // paced over seconds, or ticks would overlap during a nationwide alert.
     notify: (event) => {
@@ -582,13 +446,17 @@ if (token && !isTestEnv) {
 
     // Ordinary chatter never consumes a cooldown slot; the slot is scoped to
     // the kind of reply and, for region queries, to the region asked about.
-    if (!kind || isOnCooldown(`${chatId}:${cooldownKey}`)) return;
+    // Replies that end in an apology give the slot back (clearCooldown): the
+    // damping is for repeated answers, not for retries after a failure.
+    const slotKey = `${chatId}:${cooldownKey}`;
+    if (!kind || isOnCooldown(slotKey)) return;
 
     if (kind === 'region-why') {
       try {
         await sendRegionWhy(bot, chatId, focusRegion, msg.text ?? '');
       } catch (error) {
         console.error('Failed to send region analysis:', error);
+        clearCooldown(slotKey);
         await bot.sendMessage(chatId, 'Не вдалося отримати аналіз по регіону.');
       }
       return;
@@ -603,9 +471,11 @@ if (token && !isTestEnv) {
       } catch (error) {
         console.error('Failed to send analysis:', error);
         try {
+          // The raw channel digest is still a real answer — keep the cooldown.
           await handleChannelMessageRequest({ botInstance: bot, chatId, limit: CHANNEL_MESSAGE_LIMIT });
         } catch (fallbackError) {
           console.error('Fallback also failed:', fallbackError);
+          clearCooldown(slotKey);
           await bot.sendMessage(chatId, 'Не вдалося отримати інформацію з каналу @kpszsu.');
         }
       }
@@ -618,6 +488,7 @@ if (token && !isTestEnv) {
         await sendRegionMap(bot, chatId, focusRegion);
       } catch (error) {
         console.error('Failed to send region map:', error);
+        clearCooldown(slotKey);
         await bot.sendMessage(chatId, 'Не вдалося побудувати мапу регіону.');
       }
       return;
@@ -634,6 +505,7 @@ if (token && !isTestEnv) {
             reply_markup: mapKeyboard({}),
           });
         } else {
+          clearCooldown(slotKey);
           await bot.sendMessage(chatId, 'Не вдалося отримати мапу загроз.');
         }
       } catch (error) {
@@ -647,6 +519,7 @@ if (token && !isTestEnv) {
             `${buildNationalReport({ threats, alerts })}\n\n🗺 Мапу зараз не вдалося побудувати.`
           );
         } catch {
+          clearCooldown(slotKey);
           await bot.sendMessage(chatId, 'Не вдалося отримати мапу загроз.');
         }
       }
@@ -816,11 +689,25 @@ if (token && !isTestEnv) {
       }
 
       if (action === CALLBACK_REFRESH) {
+        // The refresh button invites repeated taps, so it gets the same two
+        // defences as message triggers: a short per-chat cooldown, and renders
+        // that go through the fingerprint-gated frame caches instead of
+        // straight to Puppeteer — otherwise every tap is a full render on a
+        // memory-capped container.
+        if (isOnCooldown(`${chatId}:refresh:${cacheKey || 'map'}`, Date.now(), CALLBACK_REFRESH_COOLDOWN_MS)) {
+          await ack('Щойно оновлено — зачекай кілька секунд');
+          return;
+        }
         await ack('Оновлюю…');
-        const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
-        const { buffer, caption } = region
-          ? await renderNeptunMap({ threats, alerts, geo, focus: region })
-          : await renderNeptunMap({ threats, alerts, geo });
+        let buffer;
+        let caption;
+        if (region) {
+          const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
+          const fp = dataFingerprint({ threats, alerts });
+          ({ buffer, caption } = await renderRegionFrame(region, { threats, alerts, geo, fp }));
+        } else {
+          ({ buffer, caption } = await getLiveNeptunMap());
+        }
         const markup = region ? regionMarkup(chatId, region) : mapKeyboard({});
 
         // Editing keeps the chat from filling with near-identical maps. If the
@@ -838,6 +725,9 @@ if (token && !isTestEnv) {
       }
     } catch (error) {
       console.error('Callback handling failed:', error?.message ?? error);
+      // A failed refresh must not hold its cooldown slot — same rule as the
+      // message paths: damping is for answers, not for failures.
+      clearCooldown(`${chatId}:refresh:${cacheKey || 'map'}`);
       await ack('Не вдалося виконати дію');
     }
   });

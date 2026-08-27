@@ -64,7 +64,13 @@ export function formatStatusReport(facts = {}) {
 
   const q = facts.renderQueue ?? {};
   lines.push(`🖼 Рендер: ${q.active ?? 0}/${q.limit ?? '?'} активних, у черзі ${q.queued ?? 0}`);
-  lines.push(`🗺 Кеш меж: оновлено ${ago(now - (facts.geoAgeMs ?? 0), now)}`);
+  // geoCacheAgeMs() reports Infinity when any boundary file is missing —
+  // "оновлено Infinity год тому" is not a status line.
+  lines.push(
+    Number.isFinite(facts.geoAgeMs)
+      ? `🗺 Кеш меж: оновлено ${ago(now - facts.geoAgeMs, now)}`
+      : '🔴 Кеш меж: файли відсутні'
+  );
   lines.push(`🔔 Підписки цього чату: ${facts.subscriptions ?? 0}`);
   lines.push(`👀 Регіонів під наглядом: ${facts.watchedRegions ?? 0}`);
 

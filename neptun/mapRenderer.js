@@ -101,7 +101,12 @@ function getLeafletAssets() {
         fs.readFile(require.resolve('leaflet/dist/leaflet.css'), 'utf8'),
       ]);
       return { js: js.replace(/<\/script>/gi, '<\\/script>'), css };
-    })();
+    })().catch((err) => {
+      // Don't cache the failure — a transient FS error must not poison every
+      // render until restart (same rule as the browser singleton).
+      _leafletAssetsPromise = null;
+      throw err;
+    });
   }
   return _leafletAssetsPromise;
 }
@@ -510,10 +515,9 @@ function _renderOnPage(payload) {
     }
   });
 
-  // 7. Threat markers. Every marker is a badge: a dark disc so the icon reads
-  //    Just the icon — no disc or ring around it. The icon art carries its own
-  //    colour, so the wrapper only cluttered the map. In focused (region) mode
-  //    the marker also carries a text label.
+  // 7. Threat markers — just the icon, no disc or ring around it. The icon art
+  //    carries its own colour, so a wrapper only cluttered the map. In focused
+  //    (region) mode the marker also carries a text label.
   threats.forEach((t) => {
     if (typeof t.lat !== 'number' || typeof t.lon !== 'number' || !inView(t)) return;
     const meta = typeMeta[t.type] || {};
@@ -578,12 +582,13 @@ function _renderOnPage(payload) {
 
   document.body.insertAdjacentHTML('beforeend', legendHtml + titleHtml + attrHtml);
 
-  // Keep city names readable. Runs after the panels are inserted, or they
-  // aren't in the DOM to be measured and a name ends up under the legend. Leaflet has no label collision, so a name
-  //    parked to the right of its dot lands under whatever marker or panel
-  //    happens to be there — "Київ" rendered as "в". A half-covered marker is
-  //    still identifiable by its coloured ring; a half-covered name is noise.
-  //    So the names move, trying positions around the dot until one is clear.
+  // Keep city names readable. Leaflet has no label collision, so a name parked
+  // to the right of its dot lands under whatever marker or panel happens to be
+  // there — "Київ" rendered as "в". A half-covered marker is still
+  // identifiable; a half-covered name is noise. So the names move, trying
+  // positions around the dot until one is clear. This runs after the panels
+  // are inserted — they must be in the DOM to be measured as obstacles, or a
+  // name ends up under the legend.
   const rectsOverlap = (a, b) =>
     !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom);
   const grow = (r, p) => ({ left: r.left - p, top: r.top - p, right: r.right + p, bottom: r.bottom + p });

@@ -55,4 +55,22 @@ describe('fetchWithTimeout', () => {
   it('defaults to a 10 s deadline', () => {
     expect(DEFAULT_FETCH_TIMEOUT_MS).toBe(10_000);
   });
+
+  it("composes with a caller's signal instead of replacing it", async () => {
+    // The caller aborts first — their reason must come back, not a fake
+    // "timed out" message.
+    const fetchFn = (_url, { signal }) => new Promise((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason));
+    });
+    const controller = new AbortController();
+
+    const pending = fetchWithTimeout('https://x.test', {
+      fetchFn,
+      signal: controller.signal,
+      timeoutMs: 60_000,
+    });
+    controller.abort(new Error('caller aborted'));
+
+    await expect(pending).rejects.toThrow('caller aborted');
+  });
 });

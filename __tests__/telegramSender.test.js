@@ -138,13 +138,13 @@ describe('createSender', () => {
     expect(clock.time - before).toBeGreaterThanOrEqual(5000);
   });
 
-  it('gives up after maxRetries instead of looping forever', async () => {
+  it('gives up after maxRetries of transient errors instead of looping forever', async () => {
     const clock = makeClock();
     let attempts = 0;
     const sender = createSender({
       send: async () => {
         attempts += 1;
-        throw flood(1);
+        throw new Error('socket hang up');
       },
       maxRetries: 2,
       ...clock,
@@ -153,6 +153,44 @@ describe('createSender', () => {
 
     await expect(sender.sendTo(1, 'x')).resolves.toBe('failed');
     expect(attempts).toBe(3); // initial + 2 retries
+  });
+
+  it('flood-waits do not burn the retry budget — the message still goes out', async () => {
+    // During a nationwide fan-out 429s are expected, and these are exactly the
+    // messages that must not be dropped after a few dutiful waits.
+    const clock = makeClock();
+    let attempts = 0;
+    const sender = createSender({
+      send: async () => {
+        attempts += 1;
+        if (attempts <= 5) throw flood(1); // more floods than maxRetries
+      },
+      maxRetries: 2,
+      ...clock,
+      log: silence,
+    });
+
+    await expect(sender.sendTo(1, 'alert')).resolves.toBe('sent');
+    expect(attempts).toBe(6);
+  });
+
+  it('bounds total flood-wait so one chat cannot wedge the queue forever', async () => {
+    const clock = makeClock();
+    let attempts = 0;
+    const sender = createSender({
+      send: async () => {
+        attempts += 1;
+        throw flood(2);
+      },
+      maxFloodWaitMs: 5_000,
+      ...clock,
+      log: silence,
+    });
+
+    await expect(sender.sendTo(1, 'x')).resolves.toBe('failed');
+    // 2 s per wait against a 5 s budget: waits at 2 s and 4 s, the third would
+    // pass 5 s — give up instead of sleeping it.
+    expect(attempts).toBe(3);
   });
 
   it('retries transient errors with backoff', async () => {

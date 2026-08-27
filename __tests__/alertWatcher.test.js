@@ -257,9 +257,10 @@ describe('state across restarts', () => {
   const makeRestartWatcher = ({ initialStates, snapshot, staleStateMs }) => {
     const notify = vi.fn();
     const onStateChange = vi.fn();
-    const clock = 10_000_000;
+    let clock = 10_000_000;
+    const box = { snapshot };
     const watcher = createAlertWatcher({
-      getSnapshot: () => snapshot,
+      getSnapshot: () => box.snapshot,
       getGeo: async () => GEO,
       notify,
       onStateChange,
@@ -268,7 +269,7 @@ describe('state across restarts', () => {
       listRegions: () => [{ region: KYIV_OBLAST, chatIds: ['1'] }],
       now: () => clock,
     });
-    return { watcher, notify, onStateChange, clock };
+    return { watcher, notify, onStateChange, box, advance: (ms) => { clock += ms; } };
   };
 
   it('announces an alert that started while the bot was down', async () => {
@@ -285,16 +286,44 @@ describe('state across restarts', () => {
     expect(result.announced[0]).toMatchObject({ active: true, missedWhileDown: true });
   });
 
-  it('announces an all-clear that happened while the bot was down', async () => {
-    const { watcher, notify } = makeRestartWatcher({
+  it('announces an all-clear that happened while the bot was down — after the hold', async () => {
+    // A missed тривога goes out on the first tick, but a missed відбій must
+    // still survive the confirm-off hold: the first read after boot is exactly
+    // when a flapping feed or a half-warm stream is most likely, and a
+    // premature all-clear is the costly mistake.
+    const { watcher, notify, advance } = makeRestartWatcher({
       initialStates: { [KYIV_OBLAST.cacheKey]: { confirmed: true, at: 10_000_000 - 60_000 } },
       snapshot: { threats: [], alerts: alertsFor() },
     });
 
     await watcher.tick();
+    expect(notify).not.toHaveBeenCalled(); // seen, but not yet trusted
+
+    advance(35_000); // past DEFAULT_CONFIRM_OFF_MS
+    await watcher.tick();
 
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify.mock.calls[0][0]).toMatchObject({ active: false });
+  });
+
+  it('cancels the held all-clear if the alert comes back before it is confirmed', async () => {
+    const { watcher, notify, box, advance } = makeRestartWatcher({
+      initialStates: { [KYIV_OBLAST.cacheKey]: { confirmed: true, at: 10_000_000 - 60_000 } },
+      snapshot: { threats: [], alerts: alertsFor() },
+    });
+
+    await watcher.tick(); // off observed, hold begins
+
+    // The feed flaps back on before the hold expires — this was never a real
+    // відбій, and re-announcing тривога would repeat what subscribers were
+    // already told before the restart.
+    box.snapshot = { threats: [], alerts: alertsFor('київська') };
+    advance(10_000);
+    await watcher.tick();
+    advance(60_000);
+    await watcher.tick();
+
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it('stays silent when nothing changed while the bot was down', async () => {

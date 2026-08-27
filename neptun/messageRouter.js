@@ -22,8 +22,6 @@
 
 import { parseRegionQuery, resolveRegion, resolveRegionStrict } from './regionResolver.js';
 
-export const CHANNEL_MESSAGE_TRIGGER = 'чому тривога';
-
 // JS \b is ASCII-only and never matches around Cyrillic; use lookarounds.
 const WHY_RE = /(?<![а-яґєіїa-z])(?:чому|чого|почему)(?![а-яґєіїa-z])/u;
 
@@ -71,7 +69,11 @@ export function routeMessage(rawText) {
   if (region && why) {
     return { kind: 'region-why', region, cooldownKey: `why:${region.cacheKey}` };
   }
-  if (text.includes(CHANNEL_MESSAGE_TRIGGER)) {
+  // Any why-question about a тривога, not just the literal "чому тривога":
+  // "чому зараз тривога", "чому знову тривога?", "чому тривоги" all ask why —
+  // answering them with a map ignores the question. ("тривожність" doesn't
+  // match: it's тривож-, not тривог-.)
+  if (why && text.includes('тривог')) {
     return { kind: 'channel-why', region: null, cooldownKey: 'why' };
   }
   if (region) {

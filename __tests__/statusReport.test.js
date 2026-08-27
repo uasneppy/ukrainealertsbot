@@ -44,6 +44,14 @@ describe('formatStatusReport', () => {
     expect(text).toContain('ECONNREFUSED');
   });
 
+  it('reports missing boundary files instead of "Infinity год тому"', () => {
+    // geoCacheAgeMs() returns Infinity when any file is absent.
+    const text = formatStatusReport({ ...base, geoAgeMs: Infinity });
+
+    expect(text).toContain('🔴 Кеш меж: файли відсутні');
+    expect(text).not.toContain('Infinity');
+  });
+
   it('says plainly when the AI has never once succeeded', () => {
     // The case users can never see: the fallback text looks identical.
     const text = formatStatusReport({

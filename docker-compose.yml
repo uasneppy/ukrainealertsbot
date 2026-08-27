@@ -15,9 +15,13 @@ services:
     # Give the bot time to stop Telegram polling + close Chromium cleanly on stop.
     stop_grace_period: 20s
 
-    # A crashed process restarts on its own; this catches the worse case of a
+    # A crashed process restarts on its own; this *detects* the worse case of a
     # process that is still running while its event loop is wedged, which looks
-    # perfectly healthy from the outside and answers nobody.
+    # perfectly healthy from the outside and answers nobody. NB: plain
+    # `docker compose` only marks the container unhealthy — nothing restarts it
+    # automatically. To act on the signal, run a watcher such as
+    # willfarrell/autoheal (needs the docker socket), or check
+    # `docker ps` / `docker inspect` health in your own monitoring.
     healthcheck:
       test: ["CMD-SHELL", "[ $$(( $$(date +%s) - $$(stat -c %Y /app/data/heartbeat) )) -lt 120 ]"]
       interval: 60s
@@ -64,6 +68,10 @@ services:
       # Optional tuning for live per-target notifications (code defaults used if unset).
       - LIVE_ALERT_TYPES=${LIVE_ALERT_TYPES:-}
       - LIVE_ALERT_KM=${LIVE_ALERT_KM:-}
+      # Optional watcher tuning — every env knob the code reads must be listed
+      # here, or setting it in .env silently does nothing inside the container.
+      - WATCHER_INTERVAL_MS=${WATCHER_INTERVAL_MS:-}
+      - CONFIRM_OFF_MS=${CONFIRM_OFF_MS:-}
 
     volumes:
       # Persist the GeoJSON cache so boundaries aren't re-downloaded on restart.

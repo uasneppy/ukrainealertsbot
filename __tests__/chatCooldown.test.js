@@ -4,7 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { isOnCooldown, CHAT_COOLDOWN_MS } from '../bot.js';
+import { isOnCooldown, clearCooldown, CHAT_COOLDOWN_MS } from '../bot.js';
 
 describe('isOnCooldown', () => {
   it('allows the first reply and suppresses further ones inside the window', () => {
@@ -60,5 +60,17 @@ describe('isOnCooldown', () => {
     // early one is no longer considered on cooldown.
     expect(isOnCooldown('bulk-0', t0 + 1)).toBe(false);
     expect(isOnCooldown('bulk-599', t0 + 1)).toBe(true);
+  });
+
+  it('clearCooldown releases a consumed slot so a failed reply can be retried', () => {
+    const t0 = 9_000_000;
+
+    expect(isOnCooldown('chat-fail:map', t0)).toBe(false);
+    expect(isOnCooldown('chat-fail:map', t0 + 1_000)).toBe(true);
+
+    // The reply ended in an apology — the damping is for repeated answers,
+    // not for retries after a failure.
+    clearCooldown('chat-fail:map');
+    expect(isOnCooldown('chat-fail:map', t0 + 2_000)).toBe(false);
   });
 });

@@ -42,6 +42,17 @@ describe('routeMessage', () => {
     expect(routeMessage('чому тривога взагалі')).toMatchObject({ kind: 'channel-why' });
   });
 
+  it('still answers "why" when words sit between чому and тривога', () => {
+    // The user asked *why* — a map is not an answer to that question.
+    for (const text of ['чому зараз тривога', 'чому знову тривога?', 'чому тривоги', 'чому оголосили тривогу']) {
+      expect(routeMessage(text), `"${text}"`).toMatchObject({ kind: 'channel-why' });
+    }
+  });
+
+  it('does not read "тривожність" as a тривога question', () => {
+    expect(routeMessage('чому така тривожність')).toMatchObject({ kind: null });
+  });
+
   it('treats the whole country as the national map, not a region', () => {
     expect(routeMessage('тривога в україні')).toMatchObject({ kind: 'national-map', region: null });
   });
