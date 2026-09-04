@@ -64,6 +64,17 @@ describe('createEventWatcher', () => {
     }));
   });
 
+  it('quotes the sentence that triggered the event, not the whole post', async () => {
+    const { watcher, notify, box, advance } = make({ messages: [] });
+    await watcher.tick();
+
+    box.messages = [msg('Дорозвідка.\n🛸 Пуск ~20 шахедів з Курська.\nСтежте за тривогою.\n✙ Підтримати канал ✙', { date: at(10) })];
+    advance(10_000);
+    await watcher.tick();
+
+    expect(notify.mock.calls[0][0].quote).toBe('Пуск ~20 шахедів з Курська');
+  });
+
   it('says a kind once per cooldown even as channels repeat it', async () => {
     const { watcher, notify, box, advance } = make({ messages: [], cooldownMs: 60_000 });
     await watcher.tick();

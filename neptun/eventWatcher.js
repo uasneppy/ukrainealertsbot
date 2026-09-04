@@ -117,14 +117,17 @@ export function createEventWatcher({
         seeded = true; // whatever was already in the feed is not news
       } else {
         for (const m of unseen) {
-          for (const { kind, count } of detect(m.text)) {
+          for (const { kind, count, sentence } of detect(m.text)) {
             if (!EVENT_KINDS[kind] || !announceable(kind, t)) continue;
             lastAnnouncedAt.set(kind, t);
+            // Quote the sentence that triggered the event, not the whole post:
+            // a long message quoted whole was a truncated wall of bullets.
+            const quote = sentence ? quoteMessage(sentence) : quoteMessage(m.text);
             announced.push({
               kind,
               category: EVENT_KINDS[kind].category,
               count,
-              quote: quoteMessage(m.text),
+              quote,
               channel: normalizeChannel(m.channel),
               date: m.date ?? null,
             });

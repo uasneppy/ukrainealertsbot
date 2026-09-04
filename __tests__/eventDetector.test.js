@@ -113,11 +113,41 @@ describe('detectEvents — drones', () => {
   });
 });
 
+describe('detectEvents — status digests', () => {
+  // The hourly «Ситуація станом на…» post restates the whole night; "пуски
+  // зафіксовано" in it is a summary, not a new launch — and quoting it
+  // produced a truncated wall of bullet points in the chat.
+  const digest = [
+    '💀Ситуація станом на 00:00 05.09.2026',
+    '• Авіація:',
+    '✈️Стратегічна авіація не активна',
+    '🛩Тактична авіація не активна',
+    '💣Впродовж доби ворог застосував керовані авіаційні бомби по лінії бойового зіткнення',
+    '• БпЛА:',
+    '🛸Зафіксовано пуски ударних БпЛА типу "Shahed". Тривають польоти по всій країні.',
+  ].join('\n');
+
+  it('is not an event source', () => {
+    expect(detectEvents(digest)).toEqual([]);
+    expect(detectEvents('Підсумок доби: пуски БпЛА, зліт МіГ-31К о 22:40')).toEqual([]);
+  });
+
+  it('"не активна" is not activity', () => {
+    expect(detectEvents('Стратегічна авіація не активна')).toEqual([]);
+    expect(detectEvents('Стратегічна авіація активна, борти в повітрі')).toEqual([{ kind: 'strategic_takeoff', count: null, sentence: 'Стратегічна авіація активна, борти в повітрі' }]);
+  });
+});
+
 describe('detectEvents — plumbing', () => {
   it('returns nothing for empty or irrelevant text', () => {
     expect(detectEvents('')).toEqual([]);
     expect(detectEvents(null)).toEqual([]);
     expect(detectEvents('Відбій тривоги у Львівській області')).toEqual([]);
+  });
+
+  it('returns the triggering sentence in the channel\'s own casing, without bullets', () => {
+    const post = '🛸 Зафіксовано пуски ударних БпЛА типу "Shahed" з Курська, ~25 одиниць.\nСтежте за тривогою.\n\n✙ Розвідка неба ✙';
+    expect(detectEvents(post)[0].sentence).toBe('Зафіксовано пуски ударних БпЛА типу "Shahed" з Курська, ~25 одиниць');
   });
 
   it('every kind it can emit has metadata', () => {
@@ -132,6 +162,13 @@ describe('quoteMessage / formatEventNotification', () => {
     const q = quoteMessage('Зафіксовано зліт Ту-95МС з Оленьї\n\n✙ Розвідка неба ✙\n✙Підтримати канал✙\nhttps://t.me/x\n🇺🇦 Підписатись');
     expect(q).toBe('Зафіксовано зліт Ту-95МС з Оленьї');
     expect(quoteMessage('a'.repeat(400)).length).toBeLessThanOrEqual(280);
+  });
+
+  it('cuts a long quote at a sentence or line boundary, never mid-word', () => {
+    const long = 'Перше речення. Друге речення досить довге. '.repeat(12);
+    const q = quoteMessage(long);
+    expect(q.length).toBeLessThanOrEqual(280);
+    expect(q.endsWith('.…')).toBe(true);
   });
 
   it('names the event, quotes the source and shows Kyiv time', () => {
