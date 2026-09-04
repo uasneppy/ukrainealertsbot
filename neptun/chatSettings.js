@@ -13,6 +13,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { b, i } from './telegramFormat.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const FORMAT_VERSION = 1;
@@ -121,13 +123,14 @@ export function toggleChatSetting(chatId, key) {
 
 /** The /settings message body. The buttons under it do the toggling. */
 export function formatSettingsMessage(settings, { isGroup = false } = {}) {
-  const lines = ['⚙️ Сповіщення для цього чату', ''];
+  const lines = [`⚙️ ${b('Сповіщення для цього чату')}`, ''];
   for (const { key, emoji, label, hint } of NOTIFY_CATEGORIES) {
-    lines.push(`${settings[key] ? '✅' : '🔕'} ${emoji} ${label} — ${hint}`);
+    lines.push(`${settings[key] ? '✅' : '🔕'} ${emoji} ${b(label)}`);
+    lines.push(`      ${i(hint)}`);
   }
   lines.push('');
   lines.push('Натисни кнопку, щоб увімкнути або вимкнути категорію.');
-  lines.push('Сповіщення надходять лише за регіонами з /subscriptions; загальнодержавні події — якщо є хоч одна підписка.');
-  if (isGroup) lines.push('У групі змінювати налаштування можуть лише адміністратори.');
+  lines.push(i('Сповіщення надходять лише за регіонами з /subscriptions; загальнодержавні події — якщо є хоч одна підписка.'));
+  if (isGroup) lines.push(i('У групі змінювати налаштування можуть лише адміністратори.'));
   return lines.join('\n');
 }

@@ -37,6 +37,7 @@
 
 import { buildRegionStatus, fmtKyivTime } from './regionContext.js';
 import { subscribedRegions } from './subscriptions.js';
+import { esc, b, i } from './telegramFormat.js';
 
 /** Alert start: announced as soon as it is observed. */
 export const DEFAULT_CONFIRM_ON_MS = 0;
@@ -353,23 +354,31 @@ export function createAlertWatcher({
 
 // ── Notification text ─────────────────────────────────────────────────────────
 
-/** Ukrainian text for an alert transition (тривога / відбій). */
+// Every notification ends the same way, so the eye lands on the map hint
+// without reading. Two-space indented bullets under a title read as a list
+// on a phone without the bullets colliding with the bold line above.
+const mapHint = (region) => `🗺 Мапа: /map ${esc(region.name)}`;
+
+/** Telegram-HTML text for an alert transition (тривога / відбій). */
 export function formatAlertNotification({ region, active, status }) {
   if (!active) {
-    return `🟢 Відбій тривоги — ${region.name}`;
+    return `🟢 ${b('Відбій тривоги')} — ${b(region.name)}`;
   }
 
   const since = fmtKyivTime(status?.alertSince);
-  const lines = [`🔴 Повітряна тривога — ${region.name}${since ? ` (з ${since})` : ''}`];
+  const lines = [`🔴 ${b('Повітряна тривога')} — ${b(region.name)}${since ? ` ${i(`з ${since}`)}` : ''}`];
 
   const threats = status?.threatsIn ?? [];
   if (threats.length) {
     const summary = new Map();
     for (const threat of threats) summary.set(threat.name, (summary.get(threat.name) ?? 0) + 1);
-    lines.push(`⚠️ У регіоні: ${[...summary.entries()].map(([n, c]) => `${n} ×${c}`).join(', ')}`);
+    lines.push('');
+    lines.push('⚠️ У регіоні:');
+    for (const [name, count] of summary) lines.push(`  • ${esc(name)} ×${count}`);
   }
 
-  lines.push(`🗺 Мапа: /map ${region.name}`);
+  lines.push('');
+  lines.push(mapHint(region));
   return lines.join('\n');
 }
 
@@ -387,6 +396,7 @@ const threatWhere = ({ stage, threat }) => {
   const place = heading ? ` · ${heading}` : threat.locality ? ` · ${threat.locality}` : '';
   return `~${threat.distanceKm} км${dir}${course}${place}`;
 };
+// threatWhere builds from feed strings (locality); escaped at the one place it is used.
 
 /**
  * Ukrainian text for one or more live threat events in a region. A single
@@ -402,20 +412,22 @@ export function formatThreatNotification({ region, events }) {
   if (events.length === 1) {
     const e = events[0];
     // "in" already reads "над <locality>"; don't prefix it again.
-    const detail = e.stage === 'in' ? threatWhere(e) : `наближається: ${threatWhere(e)}`;
+    const detail = e.stage === 'in' ? esc(threatWhere(e)) : `${i('наближається:')} ${esc(threatWhere(e))}`;
     return [
-      `${head} ${e.threat.emoji} ${e.threat.name} — ${region.name}`,
+      `${head} ${e.threat.emoji} ${b(`${e.threat.name} — ${region.name}`)}`,
       detail,
-      `🗺 Мапа: /map ${region.name}`,
+      '',
+      mapHint(region),
     ].join('\n');
   }
 
-  const lines = [`${head} ${region.name}: ${events.length} ${pluralTargets(events.length)}`];
+  const lines = [`${head} ${b(region.name)}: ${events.length} ${pluralTargets(events.length)}`];
   for (const e of events.slice(0, 6)) {
-    lines.push(`• ${e.threat.emoji} ${e.threat.name} — ${threatWhere(e)}`);
+    lines.push(`  • ${e.threat.emoji} ${b(e.threat.name)} — ${esc(threatWhere(e))}`);
   }
-  if (events.length > 6) lines.push(`…та ще ${events.length - 6}`);
-  lines.push(`🗺 Мапа: /map ${region.name}`);
+  if (events.length > 6) lines.push(`  ${i(`…та ще ${events.length - 6}`)}`);
+  lines.push('');
+  lines.push(mapHint(region));
   return lines.join('\n');
 }
 
@@ -428,12 +440,14 @@ export function formatThreatNotification({ region, events }) {
 export function formatAdvisoryNotification({ region, events }) {
   const lines = [];
   for (const { threat } of events.slice(0, 4)) {
-    lines.push(`⚠️ ${threat.emoji} ${threat.name} — ${region.name}`);
+    lines.push(`⚠️ ${threat.emoji} ${b(`${threat.name} — ${region.name}`)}`);
     const explanation = String(threat.explanationShort ?? '').trim();
-    if (explanation) lines.push(explanation.length > 200 ? `${explanation.slice(0, 199)}…` : explanation);
+    if (explanation) lines.push(i(explanation.length > 200 ? `${explanation.slice(0, 199)}…` : explanation));
   }
+  lines.push('');
   lines.push('Це попередження про ризик, а не зафіксований пуск. Стежте за тривогою у своєму районі.');
-  lines.push(`🗺 Мапа: /map ${region.name}`);
+  lines.push('');
+  lines.push(mapHint(region));
   return lines.join('\n');
 }
 

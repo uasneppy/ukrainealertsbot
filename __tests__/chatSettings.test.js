@@ -19,6 +19,7 @@ import {
   getChatSettingsFile,
   __resetChatSettings,
 } from '../neptun/chatSettings.js';
+import { stripHtml } from '../neptun/telegramFormat.js';
 
 let dir;
 
@@ -88,13 +89,13 @@ describe('chat settings', () => {
 
 describe('formatSettingsMessage', () => {
   it('lists every category with its state', () => {
-    const text = formatSettingsMessage({ ...getChatSettings(1), kalibr: false });
+    const text = stripHtml(formatSettingsMessage({ ...getChatSettings(1), kalibr: false }));
     expect(text).toContain('✅ 🔴 Тривога / відбій');
     expect(text).toContain('🔕 🚢 «Калібри»');
     expect(text).not.toContain('адміністратори');
   });
 
   it('tells a group who may change it', () => {
-    expect(formatSettingsMessage(getChatSettings(1), { isGroup: true })).toContain('адміністратори');
+    expect(stripHtml(formatSettingsMessage(getChatSettings(1), { isGroup: true }))).toContain('адміністратори');
   });
 });

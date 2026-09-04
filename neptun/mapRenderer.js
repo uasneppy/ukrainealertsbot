@@ -20,6 +20,7 @@ import {
   computeAlertKeySets,
   threatDisplayName,
 } from './threatMeta.js';
+import { esc, b, i } from './telegramFormat.js';
 import { buildRegionStatus, buildFocusCaption } from './regionContext.js';
 
 const require = createRequire(import.meta.url);
@@ -804,18 +805,20 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
 function buildCaption(typeMeta, alerts, date) {
   // Blocks joined by a blank line — one comma-joined blob of threat types was
   // the hard-to-scan part. One type per line reads at a glance.
-  const blocks = ['🗺 NEPTUN — Карта загроз України'];
+  // Telegram HTML: the caption is only ever read there. `meta.name` can be a
+  // title straight from the feed, so it is escaped.
+  const blocks = [`🗺 ${b('NEPTUN — Карта загроз України')}`];
 
   const types = Object.keys(typeMeta);
   if (types.length > 0) {
-    const lines = ['⚠️ Загрози в небі'];
+    const lines = [`⚠️ ${b('Загрози в небі')}`];
     for (const type of types) {
       const meta = typeMeta[type];
-      lines.push(`• ${meta.emoji} ${meta.name} ×${meta.count}`);
+      lines.push(`• ${meta.emoji} ${esc(meta.name)} ×${meta.count}`);
     }
     blocks.push(lines.join('\n'));
   } else {
-    blocks.push('✅ Активних загроз не виявлено');
+    blocks.push(`✅ ${b('Активних загроз не виявлено')}`);
   }
 
   const oblastCount = (alerts.oblasts ?? []).length;
@@ -824,13 +827,13 @@ function buildCaption(typeMeta, alerts, date) {
     const parts = [];
     if (oblastCount > 0) parts.push(`областей: ${oblastCount}`);
     if (raionCount > 0) parts.push(`районів: ${raionCount}`);
-    blocks.push(`🔴 Тривога — ${parts.join(', ')}`);
+    blocks.push(`🔴 ${b('Тривога')} — ${parts.join(', ')}`);
   }
 
   const timeStr = date.toLocaleTimeString('uk-UA', {
     hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kyiv',
   });
-  blocks.push(`🕐 ${timeStr} за Києвом · © neptun.in.ua`);
+  blocks.push(i(`🕐 ${timeStr} за Києвом · © neptun.in.ua`));
 
   return blocks.join('\n\n');
 }

@@ -58,6 +58,7 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/keyboards.js` | Inline buttons and their 64-byte callback payloads |
 | `neptun/statusReport.js` | /status — makes the deliberately-silent degradations visible |
 | `neptun/threatIcons.js`, `defaultIcons.js`, `threatMeta.js` | Marker icons and per-type metadata; `threatNature` tells an advisory from a tracked object |
+| `neptun/telegramFormat.js` | HTML escaping/wrapping for every outbound message; `sanitizeAiHtml` for Gemini output |
 | `fetchWithTimeout.js` | Every outbound HTTP call goes through this |
 | `telegramSender.js` | Paced, retrying queue for unprompted fan-out (alert notifications) |
 
@@ -110,6 +111,16 @@ map. City names are repositioned after render to dodge
 markers and panels — Leaflet has no label collision, and a name occluded to
 "уми" is worse than one moved 20 px. Change any of this and re-render the three
 views (`mock`, a city, an oblast) before believing it looks right.
+
+**Every outbound message is Telegram HTML.** Titles bold, detail italic,
+blank lines between sections, two-space bullets — through the helpers in
+`neptun/telegramFormat.js`, never hand-written tags. Anything dynamic (a region
+name, a locality from the feed, a quoted post, an error string) goes through
+`esc()`: one unescaped `<` makes Telegram reject the whole message, and for a
+notification that is a warning nobody receives. AI output passes through
+`sanitizeAiHtml()`, which allows `<b>`/`<i>` only and drops them when they
+don't balance. Text that feeds a Gemini prompt (`formatRegionReport` without
+`html`, `describeNightFacts`) stays plain.
 
 **Ukrainian text is user-facing.** Region names are stored in the nominative;
 don't interpolate them into sentences that need another case ("тривога в

@@ -12,6 +12,7 @@ import {
   threatNature,
   threatDisplayName,
 } from './threatMeta.js';
+import { esc, b, i } from './telegramFormat.js';
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
@@ -307,22 +308,29 @@ const sinceSuffix = (iso) => {
   return t ? ` (з ${t})` : '';
 };
 
-const alertLine = (status) => {
+// Two renderings of every line: plain (the Gemini prompt reads it) and
+// Telegram HTML (a person reads it). `f` is the formatter set for the mode so
+// the wording is written once. In plain mode the helpers pass text through.
+const PLAIN = { esc: (s) => String(s ?? ''), b: (s) => String(s ?? ''), i: (s) => String(s ?? '') };
+const RICH = { esc, b, i };
+const fmt = (html) => (html ? RICH : PLAIN);
+
+const alertLine = (status, f) => {
   const { region, alertScope, alertSince, alertedRaions } = status;
   switch (alertScope) {
     case 'oblast':
-      return `🔴 Тривога — вся область${sinceSuffix(alertSince)}`;
+      return `🔴 ${f.b('Тривога — вся область')}${f.i(sinceSuffix(alertSince))}`;
     case 'city':
-      return `🔴 Тривога у м. ${region.name}${sinceSuffix(alertSince)}`;
+      return `🔴 ${f.b(`Тривога у м. ${region.name}`)}${f.i(sinceSuffix(alertSince))}`;
     case 'raion':
-      return `🔴 Тривога — ${alertedRaions[0]?.name ?? 'район міста'}${sinceSuffix(alertSince)}`;
+      return `🔴 ${f.b(`Тривога — ${alertedRaions[0]?.name ?? 'район міста'}`)}${f.i(sinceSuffix(alertSince))}`;
     case 'raions': {
-      const parts = alertedRaions.slice(0, 5).map((r) => `${r.name}${sinceSuffix(r.since)}`);
+      const parts = alertedRaions.slice(0, 5).map((r) => `${f.esc(r.name)}${f.i(sinceSuffix(r.since))}`);
       const extra = alertedRaions.length > 5 ? ` та ще ${alertedRaions.length - 5}` : '';
-      return `🔴 Тривога у районах: ${parts.join(', ')}${extra}`;
+      return `🔴 ${f.b('Тривога у районах:')} ${parts.join(', ')}${extra}`;
     }
     default:
-      return '🟢 Тривоги немає';
+      return `🟢 ${f.b('Тривоги немає')}`;
   }
 };
 
@@ -342,15 +350,15 @@ const threatCourse = (t, short) => {
   return `курс ${short ? t.headingShort : t.headingWord}`;
 };
 
-const threatLineIn = (t, { short = false } = {}) =>
-  `• ${[`${t.emoji} ${t.name}`, threatPlace(t), threatCourse(t, short)].filter(Boolean).join(' · ')}`;
+const threatLineIn = (t, { short = false, f = PLAIN } = {}) =>
+  `• ${[`${t.emoji} ${f.b(t.name)}`, f.esc(threatPlace(t)), f.esc(threatCourse(t, short))].filter(Boolean).join(' · ')}`;
 
-const threatLineNear = (t, { short = false } = {}) => {
+const threatLineNear = (t, { short = false, f = PLAIN } = {}) => {
   const dir = short ? t.directionShort : t.direction;
   // Locality alone: the parenthetical oblast doubled the line length and the
   // map already shows which oblast it's over.
   const distance = `~${t.distanceKm} км${dir ? ` на ${dir}` : ''}`;
-  return `• ${[`${t.emoji} ${t.name}`, distance, threatCourse(t, short), threatPlace(t)].filter(Boolean).join(' · ')}`;
+  return `• ${[`${t.emoji} ${f.b(t.name)}`, distance, f.esc(threatCourse(t, short)), f.esc(threatPlace(t))].filter(Boolean).join(' · ')}`;
 };
 
 /**
@@ -358,20 +366,21 @@ const threatLineNear = (t, { short = false } = {}) => {
  * together (the alert line, the in-region list, the nearby list); the callers
  * join blocks with a blank line so the sections breathe.
  */
-const statusBlocks = (status, { maxIn = 8, maxNear = 5, short = false } = {}) => {
-  const blocks = [alertLine(status)];
+const statusBlocks = (status, { maxIn = 8, maxNear = 5, short = false, html = false } = {}) => {
+  const f = fmt(html);
+  const blocks = [alertLine(status, f)];
 
   if (status.threatsIn.length) {
-    const lines = [`⚠️ У регіоні — ${status.threatsIn.length}`];
-    status.threatsIn.slice(0, maxIn).forEach((t) => lines.push(threatLineIn(t, { short })));
-    if (status.threatsIn.length > maxIn) lines.push(`…та ще ${status.threatsIn.length - maxIn}`);
+    const lines = [`⚠️ ${f.b(`У регіоні — ${status.threatsIn.length}`)}`];
+    status.threatsIn.slice(0, maxIn).forEach((t) => lines.push(threatLineIn(t, { short, f })));
+    if (status.threatsIn.length > maxIn) lines.push(f.i(`…та ще ${status.threatsIn.length - maxIn}`));
     blocks.push(lines.join('\n'));
   }
 
   if (status.threatsNear.length) {
-    const lines = [`📡 Поблизу — ${status.threatsNear.length}`];
-    status.threatsNear.slice(0, maxNear).forEach((t) => lines.push(threatLineNear(t, { short })));
-    if (status.threatsNear.length > maxNear) lines.push(`…та ще ${status.threatsNear.length - maxNear}`);
+    const lines = [`📡 ${f.b(`Поблизу — ${status.threatsNear.length}`)}`];
+    status.threatsNear.slice(0, maxNear).forEach((t) => lines.push(threatLineNear(t, { short, f })));
+    if (status.threatsNear.length > maxNear) lines.push(f.i(`…та ще ${status.threatsNear.length - maxNear}`));
     blocks.push(lines.join('\n'));
   }
 
@@ -382,16 +391,20 @@ const statusBlocks = (status, { maxIn = 8, maxNear = 5, short = false } = {}) =>
   return blocks;
 };
 
-const footerLine = (date) => {
+const footerLine = (date, f = PLAIN) => {
   const timeStr = date.toLocaleTimeString('uk-UA', {
     hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kyiv',
   });
-  return `🕐 ${timeStr} за Києвом · © neptun.in.ua`;
+  return f.i(`🕐 ${timeStr} за Києвом · © neptun.in.ua`);
 };
 
-/** Plain-text report — Gemini prompt facts + bot fallback message. */
+/**
+ * Region report. Plain by default (it is the Gemini prompt's facts); with
+ * `html: true` it is the Telegram fallback message when a render fails.
+ */
 export function formatRegionReport(status, opts = {}) {
-  return [`📍 ${status.region.name}`, ...statusBlocks(status, { maxIn: 10, maxNear: 6, ...opts })]
+  const f = fmt(opts.html);
+  return [`📍 ${f.b(status.region.name)}`, ...statusBlocks(status, { maxIn: 10, maxNear: 6, ...opts })]
     .join('\n\n');
 }
 
@@ -402,13 +415,14 @@ export function formatRegionReport(status, opts = {}) {
  * caption over the limit.
  */
 export function buildFocusCaption(status, date = new Date(), { extra = '' } = {}) {
-  const header = `🗺 NEPTUN — ${status.region.name}`;
-  const footer = footerLine(date);
+  // Captions are only ever read by Telegram, so they are always HTML.
+  const header = `🗺 ${b(`NEPTUN — ${status.region.name}`)}`;
+  const footer = footerLine(date, RICH);
 
   let maxIn = 7;
   let maxNear = 4;
   const build = () =>
-    [header, ...statusBlocks(status, { maxIn, maxNear, short: true }), extra, footer].filter(Boolean).join('\n\n');
+    [header, ...statusBlocks(status, { maxIn, maxNear, short: true, html: true }), extra, footer].filter(Boolean).join('\n\n');
   let caption = build();
   while (caption.length > 1000 && (maxIn > 1 || maxNear > 0)) {
     if (maxIn > 1) maxIn -= 1;

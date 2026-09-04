@@ -8,6 +8,8 @@
  * facts are collected in one place.
  */
 
+import { esc, b } from './telegramFormat.js';
+
 const ago = (timestamp, now) => {
   if (!timestamp) return 'ніколи';
   const seconds = Math.max(0, Math.round((now - timestamp) / 1000));
@@ -32,7 +34,7 @@ const ago = (timestamp, now) => {
  */
 export function formatStatusReport(facts = {}) {
   const now = facts.now ?? Date.now();
-  const lines = ['🩺 Стан бота'];
+  const lines = [`🩺 ${b('Стан бота')}`, ''];
 
   const streamOk = facts.streamConnected && facts.streamAgeMs < 90_000;
   lines.push(
@@ -47,7 +49,7 @@ export function formatStatusReport(facts = {}) {
   // decides whether a reply is possible.
   lines.push(
     `${facts.apiOk ? '🟢' : '🔴'} NEPTUN API: ${
-      facts.apiOk ? `відповідає (${facts.apiLatencyMs} мс)` : `недоступний — ${facts.apiError ?? '?'}`
+      facts.apiOk ? `відповідає (${facts.apiLatencyMs} мс)` : `недоступний — ${esc(facts.apiError ?? '?')}`
     }`
   );
 
@@ -56,9 +58,9 @@ export function formatStatusReport(facts = {}) {
     lines.push('⚪ AI-аналіз: вимкнено (немає GEMINI_API_KEY)');
   } else if (ai.failures && !ai.lastOkAt) {
     // Every call has failed: the fallback text hides this from users entirely.
-    lines.push(`🔴 AI-аналіз: усі запити з помилкою (${ai.failures}) — ${ai.lastError}`);
+    lines.push(`🔴 AI-аналіз: усі запити з помилкою (${ai.failures}) — ${esc(ai.lastError)}`);
   } else if (ai.lastFailAt > ai.lastOkAt) {
-    lines.push(`🟠 AI-аналіз: остання помилка ${ago(ai.lastFailAt, now)} — ${ai.lastError}`);
+    lines.push(`🟠 AI-аналіз: остання помилка ${ago(ai.lastFailAt, now)} — ${esc(ai.lastError)}`);
   } else if (ai.lastOkAt) {
     lines.push(`🟢 AI-аналіз: працює (востаннє ${ago(ai.lastOkAt, now)})`);
   } else {
@@ -83,7 +85,7 @@ export function formatStatusReport(facts = {}) {
     if (!feed.lastPollAt) {
       lines.push('⚪ Стрічка подій: ще не опитувалась');
     } else if (feed.lastError && feed.lastPollAt > feed.lastOkAt) {
-      lines.push(`🔴 Стрічка подій: помилка — ${feed.lastError}`);
+      lines.push(`🔴 Стрічка подій: помилка — ${esc(feed.lastError)}`);
     } else {
       const last = feed.lastEventAt ? `, остання подія ${ago(feed.lastEventAt, now)}` : '';
       lines.push(`🟢 Стрічка подій: опитано ${ago(feed.lastOkAt, now)}, подій: ${feed.announced ?? 0}${last}`);
@@ -95,10 +97,10 @@ export function formatStatusReport(facts = {}) {
   if (facts.extraChannels && Object.keys(facts.extraChannels).length) {
     // One line per channel: the t.me preview dies per channel, not all at once.
     for (const [handle, s] of Object.entries(facts.extraChannels)) {
-      if (s.lastError && !s.lastOkAt) lines.push(`🔴 ${handle}: ${s.lastError}`);
-      else if (s.lastError) lines.push(`🟠 ${handle}: останній успіх ${ago(s.lastOkAt, now)} — ${s.lastError}`);
-      else if (s.lastOkAt) lines.push(`🟢 ${handle}: опитано ${ago(s.lastOkAt, now)}`);
-      else lines.push(`⚪ ${handle}: ще не опитувався`);
+      if (s.lastError && !s.lastOkAt) lines.push(`🔴 ${esc(handle)}: ${esc(s.lastError)}`);
+      else if (s.lastError) lines.push(`🟠 ${esc(handle)}: останній успіх ${ago(s.lastOkAt, now)} — ${esc(s.lastError)}`);
+      else if (s.lastOkAt) lines.push(`🟢 ${esc(handle)}: опитано ${ago(s.lastOkAt, now)}`);
+      else lines.push(`⚪ ${esc(handle)}: ще не опитувався`);
     }
   }
   lines.push(`🔔 Підписки цього чату: ${facts.subscriptions ?? 0}`);

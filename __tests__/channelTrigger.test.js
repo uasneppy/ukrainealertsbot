@@ -23,7 +23,7 @@ describe('handleChannelMessageRequest', () => {
 
     expect(fetchMessages).toHaveBeenCalledWith({ limit: 5 });
     expect(formatMessages).toHaveBeenCalledWith(['m1', 'm2']);
-    expect(mockBot.sendMessage).toHaveBeenCalledWith(42, 'formatted', { disable_web_page_preview: true });
+    expect(mockBot.sendMessage).toHaveBeenCalledWith(42, 'formatted', { parse_mode: 'HTML', disable_web_page_preview: true });
   });
 
   it('defaults to the standard limit when not provided', async () => {

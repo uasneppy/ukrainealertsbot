@@ -1,4 +1,5 @@
 import { fetchWithTimeout } from './fetchWithTimeout.js';
+import { esc, b, i } from './neptun/telegramFormat.js';
 
 export const CHANNEL_URL = 'https://t.me/s/kpszsu';
 
@@ -143,11 +144,12 @@ export function formatChannelMessages(messages, channelLabel = '@kpszsu') {
   }
 
   if (!messages.length) {
-    return `Немає нових повідомлень з каналу ${channelLabel}.`;
+    return `Немає нових повідомлень з каналу ${esc(channelLabel)}.`;
   }
 
-  const body = messages.map((message, index) => `${index + 1}. ${message}`).join('\n\n');
-  return `Останні повідомлення з каналу ${channelLabel}:\n\n${body}`;
+  // Telegram HTML: the posts are third-party text, escaped whole.
+  const body = messages.map((message, index) => `${b(`${index + 1}.`)} ${i(message)}`).join('\n\n');
+  return `📢 ${b(`Останні повідомлення з каналу ${channelLabel}`)}\n\n${body}`;
 }
 
 // ── Dated messages for the night log ─────────────────────────────────────────

@@ -55,6 +55,7 @@ import {
   nightFactsFingerprint,
 } from './neptun/nightDigest.js';
 import { createChannelPoller } from './neptun/channelPoller.js';
+import { HTML, esc, b, i, sanitizeAiHtml } from './neptun/telegramFormat.js';
 import {
   NOTIFY_CATEGORIES,
   loadChatSettings,
@@ -99,8 +100,12 @@ export async function handleChannelMessageRequest({
 
   const messages = await fetchMessages({ limit });
   const formatted = formatMessages(messages);
-  await botInstance.sendMessage(chatId, formatted, { disable_web_page_preview: true });
+  await botInstance.sendMessage(chatId, formatted, { ...HTML, disable_web_page_preview: true });
 }
+
+// Every outbound message is Telegram HTML (see neptun/telegramFormat.js);
+// these are the send options that go with that.
+const htmlOpts = (extra = {}) => ({ ...HTML, disable_web_page_preview: true, ...extra });
 
 // ── NEPTUN map render — shared by /map and тривога ────────────────────────────
 
@@ -210,7 +215,7 @@ async function getLiveAnalysis() {
   if (analysisInFlight?.fp === fp) return analysisInFlight.promise;
   const promise = (async () => {
     try {
-      const text = await analyzeAlertMessages(messages);
+      const text = sanitizeAiHtml(await analyzeAlertMessages(messages));
       analysisCache = { text, fp, takenAt: Date.now() };
       return text;
     } finally {
@@ -282,6 +287,7 @@ async function sendRegionMap(botInstance, chatId, region) {
     const { buffer, caption } = await renderRegionFrame(region, { threats, alerts, geo, fp });
     await botInstance.sendPhoto(chatId, buffer, {
       caption: caption ?? undefined,
+      ...HTML,
       reply_markup: regionMarkup(chatId, region),
     });
   } catch (error) {
@@ -294,8 +300,8 @@ async function sendRegionMap(botInstance, chatId, region) {
     const nightLine = formatNightLine(await nightFactsFor(region, geo));
     await botInstance.sendMessage(
       chatId,
-      `${formatRegionReport(status)}\n\n${nightLine}\n\n🗺 Мапу зараз не вдалося побудувати.`,
-      { reply_markup: regionMarkup(chatId, region) }
+      `${formatRegionReport(status, { html: true })}\n\n${nightLine}\n\n${i('🗺 Мапу зараз не вдалося побудувати.')}`,
+      htmlOpts({ reply_markup: regionMarkup(chatId, region) })
     );
   }
 }
@@ -317,7 +323,7 @@ async function buildNightDigestText(region) {
   let text;
   try {
     const digest = await analyzeNightDigest({ regionName: region.name, factsText: describeNightFacts(facts) });
-    text = `${digest}\n\n🛰 За даними NEPTUN і повідомленнями каналів · 🗺 /map ${region.name}`;
+    text = `${sanitizeAiHtml(digest)}\n\n${i('🛰 За даними NEPTUN і повідомленнями каналів')} · 🗺 /map ${esc(region.name)}`;
   } catch (error) {
     // No key, or Gemini failed: the facts are still in hand — say them plainly.
     console.error('Night digest analysis failed, sending facts:', error?.message ?? error);
@@ -330,7 +336,7 @@ async function buildNightDigestText(region) {
 async function sendNightDigest(botInstance, chatId, region) {
   botInstance.sendChatAction(chatId, 'typing').catch(() => {});
   const text = await buildNightDigestText(region);
-  await botInstance.sendMessage(chatId, text, { reply_markup: regionMarkup(chatId, region) });
+  await botInstance.sendMessage(chatId, text, htmlOpts({ reply_markup: regionMarkup(chatId, region) }));
 }
 
 async function sendRegionWhy(botInstance, chatId, region, userQuery) {
@@ -346,27 +352,27 @@ async function sendRegionWhy(botInstance, chatId, region, userQuery) {
     createHash('sha1').update(JSON.stringify(messages)).digest('hex');
   const cached = regionWhyCache.get(region.cacheKey);
   if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_WHY_TTL_MS) {
-    await botInstance.sendMessage(chatId, cached.text);
+    await botInstance.sendMessage(chatId, cached.text, htmlOpts());
     return;
   }
   const status = buildRegionStatus({ region, threats, alerts, geo });
   const report = formatRegionReport(status);
   let text;
   try {
-    text = await analyzeRegionQuery({
+    text = sanitizeAiHtml(await analyzeRegionQuery({
       userQuery,
       regionName: region.name,
       regionReport: report,
       channelMessages: messages,
-    });
+    }));
   } catch (error) {
     // No GEMINI_API_KEY or Gemini error — the live NEPTUN report still answers
     // the question factually, so send it instead of failing.
     console.error('Region Gemini analysis failed, sending NEPTUN report:', error?.message ?? error);
-    text = `${report}\n\n⚠️ AI-аналіз тимчасово недоступний — вище наведено живі дані NEPTUN.`;
+    text = `${formatRegionReport(status, { html: true })}\n\n${i('⚠️ AI-аналіз тимчасово недоступний — вище наведено живі дані NEPTUN.')}`;
   }
   setCacheEntry(regionWhyCache, region.cacheKey, { text, fp, takenAt: Date.now() });
-  await botInstance.sendMessage(chatId, text);
+  await botInstance.sendMessage(chatId, text, htmlOpts());
 }
 
 // ── Flood control ─────────────────────────────────────────────────────────────
@@ -409,24 +415,37 @@ export function clearCooldown(key) {
 
 export function formatSubscribeReply(result, query) {
   if (result.ok) {
-    return `✅ Підписано на сповіщення: ${result.region.name}\nНадсилатиму тривогу та відбій, цілі поблизу та загальнодержавні загрози (балістика, МіГ-31К, авіація, «Калібри», пуски БпЛА).\nЩо саме надсилати: /settings`;
+    return [
+      `✅ ${b('Підписано на сповіщення:')} ${b(result.region.name)}`,
+      '',
+      'Надсилатиму тривогу та відбій, цілі поблизу та загальнодержавні загрози (балістика, МіГ-31К, авіація, «Калібри», пуски БпЛА).',
+      '',
+      `⚙️ Що саме надсилати: /settings`,
+    ].join('\n');
   }
   switch (result.reason) {
     case 'duplicate':
-      return `ℹ️ Підписка на ${result.region.name} вже активна.`;
+      return `ℹ️ Підписка на ${b(result.region.name)} вже активна.`;
     case 'limit':
       return `⚠️ Досягнуто ліміт підписок (${MAX_PER_CHAT}). Спочатку відпишись від зайвого: /unsubscribe`;
     default:
-      return `❓ Не вдалося розпізнати регіон «${query}».\nСпробуй: /subscribe київ або /subscribe харківщина`;
+      // The query is the user's own text — escaped, never trusted as markup.
+      return `❓ Не вдалося розпізнати регіон «${esc(query)}».\n${i('Спробуй: /subscribe київ або /subscribe харківщина')}`;
   }
 }
 
 export function formatSubscriptionList(subs) {
   if (!subs.length) {
-    return 'Підписок немає.\nДодати: /subscribe <регіон>, напр. /subscribe київщина';
+    return `Підписок немає.\n${i('Додати: /subscribe <регіон>, напр. /subscribe київщина')}`;
   }
-  const lines = subs.map((sub) => `• ${sub.name}`);
-  return `🔔 Активні підписки (${subs.length}):\n${lines.join('\n')}\n\nВідписатися: /unsubscribe <регіон> або /unsubscribe all\nЩо надсилати: /settings`;
+  const lines = subs.map((sub) => `  • ${esc(sub.name)}`);
+  return [
+    `🔔 ${b(`Активні підписки (${subs.length})`)}`,
+    ...lines,
+    '',
+    `${i('Відписатися:')} /unsubscribe &lt;регіон&gt; або /unsubscribe all`,
+    `${i('Що надсилати:')} /settings`,
+  ].join('\n');
 }
 
 /**
@@ -472,7 +491,7 @@ if (token && !isTestEnv) {
   // subscribed chat at once, and a burst past Telegram's ~30/s ceiling comes
   // back as 429s — dropping exactly the messages nobody knows to ask for again.
   const notificationSender = createSender({
-    send: (chatId, text) => bot.sendMessage(chatId, text),
+    send: (chatId, text) => bot.sendMessage(chatId, text, htmlOpts()),
     // A chat that blocked or deleted the bot would otherwise be retried on
     // every alert forever.
     onDeadChat: (chatId) => {
@@ -690,7 +709,7 @@ if (token && !isTestEnv) {
       bot.sendChatAction(chatId, 'typing').catch(() => {});
       try {
         const analysis = await getLiveAnalysis();
-        await bot.sendMessage(chatId, analysis ?? 'Не вдалося отримати аналіз.');
+        await bot.sendMessage(chatId, analysis ?? 'Не вдалося отримати аналіз.', htmlOpts());
       } catch (error) {
         console.error('Failed to send analysis:', error);
         try {
@@ -725,6 +744,7 @@ if (token && !isTestEnv) {
         if (buffer) {
           await bot.sendPhoto(chatId, buffer, {
             caption: caption ?? undefined,
+            ...HTML,
             reply_markup: mapKeyboard({}),
           });
         } else {
@@ -739,7 +759,8 @@ if (token && !isTestEnv) {
           const { threats, alerts } = await getNeptunMapData();
           await bot.sendMessage(
             chatId,
-            `${buildNationalReport({ threats, alerts })}\n\n🗺 Мапу зараз не вдалося побудувати.`
+            `${buildNationalReport({ threats, alerts })}\n\n${i('🗺 Мапу зараз не вдалося побудувати.')}`,
+            htmlOpts()
           );
         } catch {
           clearCooldown(slotKey);
@@ -771,7 +792,7 @@ if (token && !isTestEnv) {
       // Same source as every other reply, so /map can't disagree with «тривога».
       const [{ threats, alerts }, geo] = await Promise.all([getNeptunMapData(), getGeoData()]);
       const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo });
-      await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined });
+      await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined, ...HTML });
     } catch (error) {
       console.error('Failed to send NEPTUN map (/map):', error);
       await bot.sendMessage(chatId, 'Не вдалося побудувати мапу загроз. Спробуй пізніше.');
@@ -784,7 +805,7 @@ if (token && !isTestEnv) {
     const regionArg = match?.[1]?.trim();
     const region = regionArg ? resolveRegion(regionArg) : null;
     if (!region || region.kind === 'country') {
-      await bot.sendMessage(chatId, 'Вкажи регіон: /night київ, /night харківщина');
+      await bot.sendMessage(chatId, `🌙 Вкажи регіон: ${b('/night київ')}, ${b('/night харківщина')}`, htmlOpts());
       return;
     }
     try {
@@ -803,13 +824,14 @@ if (token && !isTestEnv) {
     if (!query) {
       await bot.sendMessage(
         chatId,
-        'Вкажи регіон: /subscribe київ, /subscribe харківщина\nПоточні підписки: /subscriptions'
+        `🔔 Вкажи регіон: ${b('/subscribe київ')}, ${b('/subscribe харківщина')}\n${i('Поточні підписки: /subscriptions')}`,
+        htmlOpts()
       );
       return;
     }
     try {
       const result = subscribe(chatId, query);
-      await bot.sendMessage(chatId, formatSubscribeReply(result, query));
+      await bot.sendMessage(chatId, formatSubscribeReply(result, query), htmlOpts());
     } catch (error) {
       console.error('Failed to subscribe:', error);
       await bot.sendMessage(chatId, 'Не вдалося оформити підписку. Спробуй пізніше.');
@@ -824,19 +846,21 @@ if (token && !isTestEnv) {
         const { removed } = unsubscribe(chatId);
         await bot.sendMessage(
           chatId,
-          removed ? `✅ Скасовано підписок: ${removed}` : 'Підписок не було.'
+          removed ? `✅ ${b(`Скасовано підписок: ${removed}`)}` : 'Підписок не було.',
+          htmlOpts()
         );
         return;
       }
       const region = resolveRegion(arg);
       if (!region || region.kind === 'country') {
-        await bot.sendMessage(chatId, `❓ Не вдалося розпізнати регіон «${arg}».`);
+        await bot.sendMessage(chatId, `❓ Не вдалося розпізнати регіон «${esc(arg)}».`, htmlOpts());
         return;
       }
       const { removed } = unsubscribe(chatId, region.cacheKey);
       await bot.sendMessage(
         chatId,
-        removed ? `✅ Підписку скасовано: ${region.name}` : `Підписки на ${region.name} не було.`
+        removed ? `✅ ${b('Підписку скасовано:')} ${b(region.name)}` : `Підписки на ${b(region.name)} не було.`,
+        htmlOpts()
       );
     } catch (error) {
       console.error('Failed to unsubscribe:', error);
@@ -875,7 +899,7 @@ if (token && !isTestEnv) {
         eventFeed: eventWatcher ? eventWatcher.stats() : null,
         nightLog: nightLog.size(),
         extraChannels: channelPoller ? channelPoller.stats() : null,
-      }));
+      }), htmlOpts());
     } catch (error) {
       console.error('Failed to send status:', error);
       await bot.sendMessage(chatId, 'Не вдалося зібрати стан.');
@@ -888,13 +912,13 @@ if (token && !isTestEnv) {
     try {
       const { allowed } = await adminGate.canManage({ chat: msg.chat, from: msg.from, senderChat: msg.sender_chat });
       if (!allowed) {
-        await bot.sendMessage(chatId, '⚙️ Налаштування сповіщень у групі можуть змінювати лише адміністратори.');
+        await bot.sendMessage(chatId, `⚙️ ${i('Налаштування сповіщень у групі можуть змінювати лише адміністратори.')}`, htmlOpts());
         return;
       }
       const settings = getChatSettings(chatId);
-      await bot.sendMessage(chatId, formatSettingsMessage(settings, { isGroup: isGroupChat(msg.chat) }), {
+      await bot.sendMessage(chatId, formatSettingsMessage(settings, { isGroup: isGroupChat(msg.chat) }), htmlOpts({
         reply_markup: settingsKeyboard(settings, NOTIFY_CATEGORIES),
-      });
+      }));
     } catch (error) {
       console.error('Failed to send settings:', error);
       await bot.sendMessage(chatId, 'Не вдалося показати налаштування.');
@@ -904,7 +928,7 @@ if (token && !isTestEnv) {
   bot.onText(/^\/subscriptions(?:@\S+)?$/, async (msg) => {
     const chatId = msg.chat.id;
     try {
-      await bot.sendMessage(chatId, formatSubscriptionList(listSubscriptions(chatId)));
+      await bot.sendMessage(chatId, formatSubscriptionList(listSubscriptions(chatId)), htmlOpts());
     } catch (error) {
       console.error('Failed to list subscriptions:', error);
       await bot.sendMessage(chatId, 'Не вдалося отримати список підписок.');
@@ -943,6 +967,7 @@ if (token && !isTestEnv) {
           .editMessageText(formatSettingsMessage(settings, { isGroup: isGroupChat(chat) }), {
             chat_id: chatId,
             message_id: messageId,
+            ...HTML,
             reply_markup: settingsKeyboard(settings, NOTIFY_CATEGORIES),
           })
           .catch(() => {});
@@ -1027,12 +1052,12 @@ if (token && !isTestEnv) {
         // than leaving the user with nothing.
         try {
           await bot.editMessageMedia(
-            { type: 'photo', media: buffer, caption: caption ?? undefined },
+            { type: 'photo', media: buffer, caption: caption ?? undefined, ...HTML },
             { chat_id: chatId, message_id: messageId, reply_markup: markup }
           );
         } catch (err) {
           console.error('[callback] editMessageMedia failed, resending:', err?.message ?? err);
-          await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined, reply_markup: markup });
+          await bot.sendPhoto(chatId, buffer, { caption: caption ?? undefined, ...HTML, reply_markup: markup });
         }
       }
     } catch (error) {
