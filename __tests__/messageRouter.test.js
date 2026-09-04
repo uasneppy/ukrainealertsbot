@@ -144,3 +144,21 @@ describe('routeMessage — bare region triggers (shorter forms)', () => {
     expect(routeMessage('україна')).toMatchObject({ kind: 'national-map' });
   });
 });
+
+describe('night questions', () => {
+  it('routes a night question about a region to the digest', () => {
+    for (const text of ['що за ніч у києві', 'ніч харків', 'київ вночі', 'Що було за ніч на Сумщині?', 'за ніч одеса']) {
+      const result = routeMessage(text);
+      expect(result.kind, text).toBe('region-night');
+      expect(result.cooldownKey).toMatch(/^night:/);
+    }
+    expect(routeMessage('що за ніч у києві').region).toMatchObject({ name: 'Київ' });
+  });
+
+  it('does not fire on a night word without a region, or on a why-question', () => {
+    expect(routeMessage('яка ніч').kind).toBeNull();
+    expect(routeMessage('нічого не сталось').kind).toBeNull();
+    expect(routeMessage('чому вночі тривога в києві').kind).toBe('region-why');
+    expect(routeMessage('їду в київ на ніч').kind).toBeNull();
+  });
+});

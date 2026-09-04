@@ -5,8 +5,8 @@ import path from 'node:path';
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
 
-import { fetchLatestChannelMessages, formatChannelMessages } from './channelMessages.js';
-import { analyzeAlertMessages, analyzeRegionQuery, getAiHealth } from './geminiAnalysis.js';
+import { fetchLatestChannelMessages, formatChannelMessages, fetchChannelFeed } from './channelMessages.js';
+import { analyzeAlertMessages, analyzeRegionQuery, analyzeNightDigest, getAiHealth } from './geminiAnalysis.js';
 import { resolveRegion, regionFromCacheKey } from './neptun/regionResolver.js';
 import { routeMessage } from './neptun/messageRouter.js';
 import {
@@ -17,6 +17,7 @@ import {
   CALLBACK_SUBSCRIBE,
   CALLBACK_UNSUBSCRIBE,
   CALLBACK_TOGGLE,
+  CALLBACK_NIGHT,
 } from './neptun/keyboards.js';
 import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js';
 import { getOrLaunchBrowser, closeBrowser } from './neptun/browser.js';
@@ -42,8 +43,18 @@ import {
   formatThreatNotification,
   formatAdvisoryNotification,
 } from './neptun/alertWatcher.js';
-import { createEventWatcher } from './neptun/eventWatcher.js';
+import { createEventWatcher, DEFAULT_EVENT_CHANNELS } from './neptun/eventWatcher.js';
 import { formatEventNotification } from './neptun/eventDetector.js';
+import { createNightLog } from './neptun/nightLog.js';
+import { mentionedRegions } from './neptun/regionMentions.js';
+import {
+  buildNightFacts,
+  formatNightLine,
+  describeNightFacts,
+  formatNightFallback,
+  nightFactsFingerprint,
+} from './neptun/nightDigest.js';
+import { createChannelPoller } from './neptun/channelPoller.js';
 import {
   NOTIFY_CATEGORIES,
   loadChatSettings,
@@ -108,8 +119,25 @@ const liveSnapshot = createSnapshotSource({
   streamAgeMs,
 });
 
+// ── Night log ─────────────────────────────────────────────────────────────────
+// NEPTUN has no history, so "what flew over Kyiv tonight" is answered from
+// what the bot remembered on the way past: every track it saw (from the
+// stream and from every map request) and every channel post the watchers
+// fetched. Loaded and flushed inside the live-bot block; recording is a
+// no-op-cheap in-memory write, so it is wired into the shared data path here.
+const nightLog = createNightLog({ mentions: mentionedRegions });
+
+/** Channels whose posts count as nationwide event sources for the digest (null = all). */
+let eventChannelSet = new Set(DEFAULT_EVENT_CHANNELS);
+
 async function getNeptunMapData() {
-  return liveSnapshot.get();
+  const data = await liveSnapshot.get();
+  nightLog.recordThreats(data.threats);
+  return data;
+}
+
+async function nightFactsFor(region, geo) {
+  return buildNightFacts({ region, log: nightLog, geo: geo ?? (await getGeoData()), eventChannels: eventChannelSet });
 }
 
 // The alert watcher reads the freshest source (live stream first), not the
@@ -222,7 +250,7 @@ function setCacheEntry(map, key, value, maxEntries = 40) {
 
 function regionMarkup(chatId, region) {
   const subscribed = listSubscriptions(chatId).some((s) => s.cacheKey === region.cacheKey);
-  return mapKeyboard({ cacheKey: region.cacheKey, subscribed });
+  return mapKeyboard({ cacheKey: region.cacheKey, subscribed, night: true });
 }
 
 /**
@@ -231,11 +259,17 @@ function regionMarkup(chatId, region) {
  * button, so both get the same fingerprint-gated reuse.
  */
 async function renderRegionFrame(region, { threats, alerts, geo, fp }) {
+  // The night summary is part of the caption, so it is part of the key: a
+  // new track over the region must refresh the line even if the live map is
+  // unchanged.
+  const night = await nightFactsFor(region, geo);
+  const captionExtra = formatNightLine(night);
+  fp = `${fp}:${nightFactsFingerprint(night)}`;
   const cached = regionMapCache.get(region.cacheKey);
   if (cached && cached.fp === fp && Date.now() - cached.takenAt < REGION_MAP_REUSE_MS) {
     return { buffer: cached.buffer, caption: cached.caption };
   }
-  const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region });
+  const { buffer, caption } = await renderNeptunMap({ threats, alerts, geo, focus: region, captionExtra });
   setCacheEntry(regionMapCache, region.cacheKey, { buffer, caption, fp, takenAt: Date.now() });
   return { buffer, caption };
 }
@@ -257,11 +291,46 @@ async function sendRegionMap(botInstance, chatId, region) {
     // headings. A text report is a degraded answer; an apology is no answer.
     console.error('Region render failed, sending text report:', error?.message ?? error);
     const status = buildRegionStatus({ region, threats, alerts, geo });
+    const nightLine = formatNightLine(await nightFactsFor(region, geo));
     await botInstance.sendMessage(
       chatId,
-      `${formatRegionReport(status)}\n\n🗺 Мапу зараз не вдалося побудувати.`
+      `${formatRegionReport(status)}\n\n${nightLine}\n\n🗺 Мапу зараз не вдалося побудувати.`,
+      { reply_markup: regionMarkup(chatId, region) }
     );
   }
+}
+
+// ── Night digest ──────────────────────────────────────────────────────────────
+// Gemini reads the night's posts for the region — the phrasing a regex can't
+// ("наче мінус", "далі на центр"). The answer is reused only while nothing
+// new came in (fingerprint of the facts), and without a key or on failure the
+// deterministic fallback still answers with the numbers and the latest posts.
+const NIGHT_DIGEST_TTL_MS = 3 * 60_000;
+const nightDigestCache = new Map(); // cacheKey → { text, fp, takenAt }
+
+async function buildNightDigestText(region) {
+  const facts = await nightFactsFor(region);
+  const fp = nightFactsFingerprint(facts);
+  const cached = nightDigestCache.get(region.cacheKey);
+  if (cached && cached.fp === fp && Date.now() - cached.takenAt < NIGHT_DIGEST_TTL_MS) return cached.text;
+
+  let text;
+  try {
+    const digest = await analyzeNightDigest({ regionName: region.name, factsText: describeNightFacts(facts) });
+    text = `${digest}\n\n🛰 За даними NEPTUN і повідомленнями каналів · 🗺 /map ${region.name}`;
+  } catch (error) {
+    // No key, or Gemini failed: the facts are still in hand — say them plainly.
+    console.error('Night digest analysis failed, sending facts:', error?.message ?? error);
+    text = formatNightFallback(facts);
+  }
+  setCacheEntry(nightDigestCache, region.cacheKey, { text, fp, takenAt: Date.now() });
+  return text;
+}
+
+async function sendNightDigest(botInstance, chatId, region) {
+  botInstance.sendChatAction(chatId, 'typing').catch(() => {});
+  const text = await buildNightDigestText(region);
+  await botInstance.sendMessage(chatId, text, { reply_markup: regionMarkup(chatId, region) });
 }
 
 async function sendRegionWhy(botInstance, chatId, region, userQuery) {
@@ -500,13 +569,16 @@ if (token && !isTestEnv) {
   // Read from the channel feed NEPTUN aggregates and from the threat map's
   // MiG-31K marker; announced once per kind to every chat with a subscription
   // that hasn't muted the category. EVENT_CHANNELS=none disables it.
+  // The same fetch feeds the night log, so it polls even with no subscribers:
+  // a chat asking «що за ніч» needs the posts whether or not anyone subscribed.
   const eventChannels = parseListEnv(process.env.EVENT_CHANNELS, undefined);
+  if (eventChannels?.length) eventChannelSet = eventChannels.includes('all') ? null : new Set(eventChannels);
   const eventWatcher = eventChannels && eventChannels.length === 0
     ? null
     : createEventWatcher({
         fetchMessages: fetchChannelMessages,
         getSnapshot: () => watcherSnapshot.get(),
-        hasAudience: () => subscribedChats().length > 0,
+        onMessages: (list) => nightLog.recordMessages(list),
         ...(eventChannels ? { channels: eventChannels } : {}),
         ...(numEnv('EVENT_POLL_MS') !== undefined ? { intervalMs: numEnv('EVENT_POLL_MS') } : {}),
         ...(numEnv('EVENT_COOLDOWN_MS') !== undefined ? { cooldownMs: numEnv('EVENT_COOLDOWN_MS') } : {}),
@@ -520,6 +592,18 @@ if (token && !isTestEnv) {
           });
         },
       });
+
+  // Channels NEPTUN does not aggregate, read through their t.me preview for
+  // the night log only (they never trigger a push). EXTRA_CHANNELS=none disables.
+  const extraChannels = parseListEnv(process.env.EXTRA_CHANNELS, ['@aerisrimor', '@strategicaviationt']);
+  const channelPoller = extraChannels.length
+    ? createChannelPoller({
+        channels: extraChannels,
+        fetchChannel: (handle) => fetchChannelFeed(handle),
+        onMessages: (list) => nightLog.recordMessages(list),
+        ...(numEnv('EXTRA_CHANNELS_POLL_MS') !== undefined ? { intervalMs: numEnv('EXTRA_CHANNELS_POLL_MS') } : {}),
+      })
+    : null;
 
   // Settings changes in a group are an admin's call — see neptun/adminGate.js.
   const adminGate = createAdminGate({
@@ -535,6 +619,7 @@ if (token && !isTestEnv) {
         loadSubscriptions(),
         loadAlertState(),
         loadChatSettings(),
+        nightLog.load(),
       ]);
       // Object.assign so the watcher's captured reference sees it — the
       // watcher is constructed before this async pre-warm finishes.
@@ -542,7 +627,14 @@ if (token && !isTestEnv) {
       alertWatcher.start();
       // Near-real-time: react the moment the stream reports a changed threat or
       // alert, instead of only on the periodic poll. wake() coalesces bursts.
-      onStreamUpdate(() => alertWatcher.wake());
+      onStreamUpdate(() => {
+        alertWatcher.wake();
+        nightLog.recordThreats(getState().threats);
+      });
+      if (channelPoller) {
+        channelPoller.start();
+        channelPoller.tick().catch((err) => console.error('[startup] Channel poll failed:', err?.message ?? err));
+      }
       if (eventWatcher) {
         eventWatcher.start();
         // Seed now rather than one poll interval from now, so the first real
@@ -570,6 +662,17 @@ if (token && !isTestEnv) {
     // damping is for repeated answers, not for retries after a failure.
     const slotKey = `${chatId}:${cooldownKey}`;
     if (!kind || isOnCooldown(slotKey)) return;
+
+    if (kind === 'region-night') {
+      try {
+        await sendNightDigest(bot, chatId, focusRegion);
+      } catch (error) {
+        console.error('Failed to send night digest:', error);
+        clearCooldown(slotKey);
+        await bot.sendMessage(chatId, 'Не вдалося зібрати підсумок ночі.');
+      }
+      return;
+    }
 
     if (kind === 'region-why') {
       try {
@@ -675,6 +778,23 @@ if (token && !isTestEnv) {
     }
   });
 
+  // ── /night <регіон> — what flew over it since the evening ──────────────────
+  bot.onText(/^\/night(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const regionArg = match?.[1]?.trim();
+    const region = regionArg ? resolveRegion(regionArg) : null;
+    if (!region || region.kind === 'country') {
+      await bot.sendMessage(chatId, 'Вкажи регіон: /night київ, /night харківщина');
+      return;
+    }
+    try {
+      await sendNightDigest(bot, chatId, region);
+    } catch (error) {
+      console.error('Failed to send night digest (/night):', error);
+      await bot.sendMessage(chatId, 'Не вдалося зібрати підсумок ночі. Спробуй пізніше.');
+    }
+  });
+
   // ── Subscription commands ───────────────────────────────────────────────────
 
   bot.onText(/^\/subscribe(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
@@ -753,6 +873,8 @@ if (token && !isTestEnv) {
         subscriptions: listSubscriptions(chatId).length,
         watchedRegions: subscribedRegions().length,
         eventFeed: eventWatcher ? eventWatcher.stats() : null,
+        nightLog: nightLog.size(),
+        extraChannels: channelPoller ? channelPoller.stats() : null,
       }));
     } catch (error) {
       console.error('Failed to send status:', error);
@@ -832,6 +954,28 @@ if (token && !isTestEnv) {
     }
 
     const region = cacheKey ? regionFromCacheKey(cacheKey) : null;
+
+    if (action === CALLBACK_NIGHT) {
+      if (!region) {
+        await ack('Регіон не розпізнано');
+        return;
+      }
+      // A Gemini call per tap would be expensive; same damping as refresh.
+      const nightSlot = `${chatId}:night:${cacheKey}`;
+      if (isOnCooldown(nightSlot, Date.now(), CALLBACK_REFRESH_COOLDOWN_MS)) {
+        await ack('Щойно надіслано — зачекай кілька секунд');
+        return;
+      }
+      await ack('Збираю підсумок ночі…');
+      try {
+        await sendNightDigest(bot, chatId, region);
+      } catch (error) {
+        console.error('Night digest callback failed:', error?.message ?? error);
+        clearCooldown(nightSlot);
+        await bot.sendMessage(chatId, 'Не вдалося зібрати підсумок ночі.').catch(() => {});
+      }
+      return;
+    }
 
     try {
       if (action === CALLBACK_SUBSCRIBE || action === CALLBACK_UNSUBSCRIBE) {
@@ -937,12 +1081,13 @@ if (token && !isTestEnv) {
 
     alertWatcher.stop();
     eventWatcher?.stop();
+    channelPoller?.stop();
     stopStream();
     // Deliver whatever is still queued — an alert notification abandoned
     // mid-fan-out is one nobody will ever be told about.
     await notificationSender.drain();
     // Let any queued subscription/state write land before the process goes away.
-    await Promise.all([flushSubscriptions(), flushAlertState(), flushChatSettings()]);
+    await Promise.all([flushSubscriptions(), flushAlertState(), flushChatSettings(), nightLog.flush()]);
     await closeBrowser();
     console.log('[shutdown] Done');
     process.exit(0);

@@ -74,6 +74,9 @@ services:
       - EVENT_POLL_MS=${EVENT_POLL_MS:-}
       - EVENT_COOLDOWN_MS=${EVENT_COOLDOWN_MS:-}
       - EVENT_UAV_COOLDOWN_MS=${EVENT_UAV_COOLDOWN_MS:-}
+      # Extra t.me channels for the night digest (see .env.example).
+      - EXTRA_CHANNELS=${EXTRA_CHANNELS:-}
+      - EXTRA_CHANNELS_POLL_MS=${EXTRA_CHANNELS_POLL_MS:-}
       # Optional watcher tuning — every env knob the code reads must be listed
       # here, or setting it in .env silently does nothing inside the container.
       - WATCHER_INTERVAL_MS=${WATCHER_INTERVAL_MS:-}

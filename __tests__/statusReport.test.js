@@ -102,3 +102,23 @@ describe('event feed line', () => {
     expect(formatStatusReport(base)).not.toContain('Стрічка подій');
   });
 });
+
+describe('night log and extra channels', () => {
+  it('reports the log size and each extra channel on its own line', () => {
+    const text = formatStatusReport({
+      ...base,
+      nightLog: { tracks: 120, messages: 3400 },
+      extraChannels: {
+        '@aerisrimor': { lastOkAt: NOW - 30_000, lastError: null },
+        '@dead': { lastOkAt: 0, lastError: 'HTTP 429' },
+        '@flaky': { lastOkAt: NOW - 600_000, lastError: 'timeout' },
+        '@new': { lastOkAt: 0, lastError: null },
+      },
+    });
+    expect(text).toContain('🌙 Нічний журнал: треків 120, повідомлень 3400');
+    expect(text).toContain('🟢 @aerisrimor: опитано 30 с тому');
+    expect(text).toContain('🔴 @dead: HTTP 429');
+    expect(text).toContain('🟠 @flaky: останній успіх 10 хв тому — timeout');
+    expect(text).toContain('⚪ @new: ще не опитувався');
+  });
+});

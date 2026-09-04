@@ -678,7 +678,7 @@ function _renderOnPage(payload) {
  *                               zoomed oblast/city view with per-threat labels
  * @returns {Promise<{ buffer: Buffer, caption: string }>}
  */
-export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = null } = {}) {
+export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = null, captionExtra = '' } = {}) {
   const geoData = geo ?? (await getGeoData());
   const { ukraine, oblasts, raions } = geoData;
 
@@ -790,7 +790,9 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
     await page.waitForFunction(() => window.__mapReady === true, { timeout: tiles ? 12_000 : 5_000 });
 
     const buffer = await page.screenshot({ type: 'png', fullPage: false });
-    const caption = focusStatus ? buildFocusCaption(focusStatus, now) : buildCaption(typeMeta, alerts, now);
+    const caption = focusStatus
+      ? buildFocusCaption(focusStatus, now, { extra: captionExtra })
+      : buildCaption(typeMeta, alerts, now);
 
     return { buffer, caption };
   } finally {

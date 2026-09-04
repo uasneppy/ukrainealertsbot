@@ -395,15 +395,20 @@ export function formatRegionReport(status, opts = {}) {
     .join('\n\n');
 }
 
-/** Telegram photo caption for the focused map (kept under the 1024-char limit). */
-export function buildFocusCaption(status, date = new Date()) {
+/**
+ * Telegram photo caption for the focused map (kept under the 1024-char limit).
+ * `extra` is an optional block appended before the footer — the night summary —
+ * and it takes part in the shrink loop, so a long night never pushes the
+ * caption over the limit.
+ */
+export function buildFocusCaption(status, date = new Date(), { extra = '' } = {}) {
   const header = `🗺 NEPTUN — ${status.region.name}`;
   const footer = footerLine(date);
 
   let maxIn = 7;
   let maxNear = 4;
   const build = () =>
-    [header, ...statusBlocks(status, { maxIn, maxNear, short: true }), footer].join('\n\n');
+    [header, ...statusBlocks(status, { maxIn, maxNear, short: true }), extra, footer].filter(Boolean).join('\n\n');
   let caption = build();
   while (caption.length > 1000 && (maxIn > 1 || maxNear > 0)) {
     if (maxIn > 1) maxIn -= 1;

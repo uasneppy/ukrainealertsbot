@@ -46,6 +46,7 @@ export function createEventWatcher({
   fetchMessages,
   getSnapshot = null,
   notify,
+  onMessages = null,     // (messages) => void — every fetched post, any channel; feeds the night log
   hasAudience = () => true,
   channels = DEFAULT_EVENT_CHANNELS,
   cooldownMs = DEFAULT_EVENT_COOLDOWN_MS,
@@ -101,6 +102,13 @@ export function createEventWatcher({
     }
 
     if (messages) {
+      if (onMessages) {
+        try {
+          onMessages(messages);
+        } catch (err) {
+          log.error?.('[event-watcher] onMessages failed:', err?.message ?? err);
+        }
+      }
       const fresh = messages.filter((m) => {
         if (!allowAll && !channelSet.has(normalizeChannel(m.channel))) return false;
         const at = Date.parse(m.date ?? '');
