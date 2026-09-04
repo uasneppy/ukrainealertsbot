@@ -84,3 +84,21 @@ describe('formatStatusReport', () => {
     expect(formatStatusReport()).toContain('Стан бота');
   });
 });
+
+describe('event feed line', () => {
+  it('says when the feed is disabled, unpolled, failing or healthy', () => {
+    expect(formatStatusReport({ ...base, eventFeed: null })).toContain('⚪ Стрічка подій: вимкнено');
+    expect(formatStatusReport({ ...base, eventFeed: { lastPollAt: 0 } })).toContain('⚪ Стрічка подій: ще не опитувалась');
+    expect(formatStatusReport({
+      ...base, eventFeed: { lastPollAt: NOW - 1_000, lastOkAt: NOW - 90_000, lastError: 'HTTP 503', announced: 2 },
+    })).toContain('🔴 Стрічка подій: помилка — HTTP 503');
+    const healthy = formatStatusReport({
+      ...base, eventFeed: { lastPollAt: NOW - 5_000, lastOkAt: NOW - 5_000, lastEventAt: NOW - 600_000, announced: 3, lastError: null },
+    });
+    expect(healthy).toContain('🟢 Стрічка подій: опитано 5 с тому, подій: 3, остання подія 10 хв тому');
+  });
+
+  it('omits the line entirely when no feed facts are given', () => {
+    expect(formatStatusReport(base)).not.toContain('Стрічка подій');
+  });
+});

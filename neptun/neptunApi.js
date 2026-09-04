@@ -47,3 +47,21 @@ export async function fetchSnapshot() {
   const [threats, alerts] = await Promise.all([fetchThreats(), fetchAlerts()]);
   return { threats, alerts };
 }
+
+/**
+ * The monitoring-channel feed NEPTUN aggregates (the Air Force channel, the
+ * intelligence channels, dozens of hyperlocal ones): the last ~10 minutes of
+ * raw messages. This is where "strategic aviation took off" and "Kalibr
+ * carriers at sea" live — nothing on the threat map says that.
+ *
+ * @returns {Promise<Array<{ channel: string, text: string, date: string }>>}
+ */
+export async function fetchChannelMessages() {
+  const response = await fetchWithTimeout(`${BASE}/messages`, { timeoutMs: TIMEOUT_MS });
+  if (!response.ok) {
+    throw new Error(`NEPTUN messages API error: HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  const list = Array.isArray(data) ? data : (data?.messages ?? []);
+  return list.filter((m) => m && typeof m.text === 'string');
+}

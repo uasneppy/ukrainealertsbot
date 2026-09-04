@@ -7,9 +7,10 @@
 
 import {
   THREAT_EMOJI,
-  THREAT_NAMES_UA,
   normalizeAlertKey,
   extractAlertKeys,
+  threatNature,
+  threatDisplayName,
 } from './threatMeta.js';
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
@@ -135,8 +136,17 @@ const describeThreat = (t, { distanceKm, direction, directionShort, inRegion, be
   return {
     id: t?.id,
     type,
-    name: THREAT_NAMES_UA[type] ?? (t?.title || type),
+    // 'advisory' is a warning that something may be used; 'tracked' is an
+    // object with a position. The name already reflects it ("Загроза
+    // балістики" vs "Балістика") so no caller can print a warning as a missile.
+    nature: threatNature(t),
+    name: threatDisplayName(t),
     emoji: THREAT_EMOJI[type] ?? THREAT_EMOJI.unknown,
+    // NEPTUN sets `destination` when lat/lon is where the target is *heading*
+    // ("курсом на Обухів"), not where it is. "над Обухів" would then put it
+    // overhead a town it hasn't reached.
+    destination: t?.destination === true,
+    approx: t?.positionQuality === 'approx' || t?.lifecycle === 'uncertain',
     title: t?.title ?? '',
     locality: t?.locality ?? '',
     sourceRegion: t?.region ?? '',
@@ -318,20 +328,29 @@ const alertLine = (status) => {
 
 // One threat, one line. A single " · " separator throughout — mixing "—",
 // commas and "(…)" is what made these hard to scan on a phone.
-const threatLineIn = (t, { short = false } = {}) => {
+// Where a threat is, in words: "курсом на X" when the feed marks the point as
+// the destination, plain locality otherwise. An advisory has no course — it is
+// a warning about a place, not an object moving toward it.
+const threatPlace = (t) => {
   const place = t.locality || t.sourceRegion || '';
-  const course = t.headingWord ? `курс ${short ? t.headingShort : t.headingWord}` : '';
-  return `• ${[`${t.emoji} ${t.name}`, place, course].filter(Boolean).join(' · ')}`;
+  if (t.destination && t.locality && t.nature !== 'advisory') return `курсом на ${t.locality}`;
+  return place;
 };
+
+const threatCourse = (t, short) => {
+  if (t.nature === 'advisory' || t.destination || !t.headingWord) return '';
+  return `курс ${short ? t.headingShort : t.headingWord}`;
+};
+
+const threatLineIn = (t, { short = false } = {}) =>
+  `• ${[`${t.emoji} ${t.name}`, threatPlace(t), threatCourse(t, short)].filter(Boolean).join(' · ')}`;
 
 const threatLineNear = (t, { short = false } = {}) => {
   const dir = short ? t.directionShort : t.direction;
   // Locality alone: the parenthetical oblast doubled the line length and the
   // map already shows which oblast it's over.
-  const place = t.locality || t.sourceRegion || '';
-  const course = t.headingWord ? `курс ${short ? t.headingShort : t.headingWord}` : '';
   const distance = `~${t.distanceKm} км${dir ? ` на ${dir}` : ''}`;
-  return `• ${[`${t.emoji} ${t.name}`, distance, course, place].filter(Boolean).join(' · ')}`;
+  return `• ${[`${t.emoji} ${t.name}`, distance, threatCourse(t, short), threatPlace(t)].filter(Boolean).join(' · ')}`;
 };
 
 /**

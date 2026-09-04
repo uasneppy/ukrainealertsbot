@@ -5,7 +5,12 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-import { createAlertWatcher, formatAlertNotification, formatThreatNotification } from '../neptun/alertWatcher.js';
+import {
+  createAlertWatcher,
+  formatAlertNotification,
+  formatThreatNotification,
+  formatAdvisoryNotification,
+} from '../neptun/alertWatcher.js';
 import { resolveRegion } from '../neptun/regionResolver.js';
 
 const KYIV_OBLAST = resolveRegion('київська область');
@@ -576,5 +581,141 @@ describe('wake() and re-entrancy (faster reaction)', () => {
     release();
     await first;
     expect(getSnapshot).toHaveBeenCalledTimes(1); // the busy one never fetched
+  });
+});
+
+describe('advisories — a warning is not a missile', () => {
+  const KYIV = resolveRegion('київ');
+  const NO_ALERTS = { oblasts: [], raions: [] };
+  // NEPTUN places a ballistic advisory for a city on the city itself.
+  const advisory = (id, extra = {}) => ({
+    id, type: 'ballistic', title: 'Балістична загроза', lat: 50.45, lon: 30.52,
+    explanationShort: 'Висока ймовірність балістичного удару — реагуйте негайно.', ...extra,
+  });
+
+  function cityWatcher({ advisoryQuietMs } = {}) {
+    const notify = vi.fn();
+    const box = { snapshot: { threats: [], alerts: NO_ALERTS } };
+    let clock = 1_000_000;
+    const watcher = createAlertWatcher({
+      getSnapshot: () => box.snapshot,
+      getGeo: async () => ({}),
+      notify,
+      listRegions: () => [{ region: KYIV, chatIds: ['1'] }],
+      ...(advisoryQuietMs !== undefined ? { advisoryQuietMs } : {}),
+      now: () => clock,
+    });
+    return { watcher, notify, box, advance: (ms) => { clock += ms; } };
+  }
+  const ofKind = (result, kind) => result.announced.filter((a) => a.kind === kind);
+
+  it('announces a ballistic advisory as an advisory, never as an approaching target', async () => {
+    const { watcher, box } = cityWatcher();
+    await watcher.tick();
+
+    box.snapshot = { threats: [advisory('adv1')], alerts: NO_ALERTS };
+    const result = await watcher.tick();
+
+    expect(ofKind(result, 'threat')).toHaveLength(0);
+    const advisories = ofKind(result, 'advisory');
+    expect(advisories).toHaveLength(1);
+    expect(advisories[0].events[0].threat.name).toBe('Загроза балістики');
+    expect(formatAdvisoryNotification(advisories[0])).not.toContain('наближається');
+  });
+
+  it('says it once — a re-issued track id inside the quiet window is silent', async () => {
+    const { watcher, notify, box, advance } = cityWatcher({ advisoryQuietMs: 60_000 });
+    await watcher.tick();
+
+    box.snapshot = { threats: [advisory('adv1')], alerts: NO_ALERTS };
+    await watcher.tick();
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    // The feed drops the track and issues the same warning under a new id.
+    box.snapshot = { threats: [], alerts: NO_ALERTS };
+    advance(10_000);
+    await watcher.tick();
+    box.snapshot = { threats: [advisory('adv2')], alerts: NO_ALERTS };
+    advance(10_000);
+    await watcher.tick();
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    // Well after the window, a new advisory is news again.
+    box.snapshot = { threats: [], alerts: NO_ALERTS };
+    advance(70_000);
+    await watcher.tick();
+    box.snapshot = { threats: [advisory('adv3')], alerts: NO_ALERTS };
+    advance(1_000);
+    await watcher.tick();
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it('seeds silently and starts the quiet window at boot', async () => {
+    const { watcher, notify, box, advance } = cityWatcher({ advisoryQuietMs: 60_000 });
+    box.snapshot = { threats: [advisory('adv1')], alerts: NO_ALERTS };
+    await watcher.tick(); // seed
+    expect(notify).not.toHaveBeenCalled();
+
+    // Re-issued a minute after the restart: subscribers were told before it.
+    box.snapshot = { threats: [advisory('adv2')], alerts: NO_ALERTS };
+    advance(5_000);
+    await watcher.tick();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('ignores an advisory that is merely nearby — a Kharkiv risk is not Kyiv news', async () => {
+    const { watcher, notify, box } = cityWatcher();
+    await watcher.tick();
+    box.snapshot = { threats: [advisory('far', { lat: 49.55, lon: 30.52 })], alerts: NO_ALERTS }; // ~100 km south
+    await watcher.tick();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('no longer treats a MiG-31K as a target approaching the region', async () => {
+    const { watcher, notify, box } = cityWatcher();
+    await watcher.tick();
+    box.snapshot = { threats: [{ id: 'mig', type: 'mig31k', title: 'МіГ-31К', lat: 50.45, lon: 30.52, heading: 0 }], alerts: NO_ALERTS };
+    await watcher.tick();
+    expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+describe('formatAdvisoryNotification', () => {
+  const region = { name: 'Київ' };
+  const threat = { emoji: '💥', name: 'Загроза балістики', type: 'ballistic', explanationShort: 'Висока ймовірність балістичного удару.' };
+
+  it('reads as a warning about a risk, with NEPTUN\'s own words and the map hint', () => {
+    const text = formatAdvisoryNotification({ region, events: [{ threat }] });
+    expect(text).toContain('⚠️ 💥 Загроза балістики — Київ');
+    expect(text).toContain('Висока ймовірність балістичного удару.');
+    expect(text).toContain('не зафіксований пуск');
+    expect(text).toContain('/map Київ');
+    expect(text).not.toMatch(/над Київ|наближається|км/);
+  });
+
+  it('copes without an explanation', () => {
+    const text = formatAdvisoryNotification({ region, events: [{ threat: { ...threat, explanationShort: '' } }] });
+    expect(text.split('\n')[1]).toContain('попередження про ризик');
+  });
+});
+
+describe('destination-flagged targets', () => {
+  // NEPTUN sets `destination` when the point is where the target is *heading*.
+  const region = { name: 'Київ' };
+  const t = (over = {}) => ({ emoji: '🚀', name: 'Ракета', distanceKm: 40, direction: 'пд', headingWord: 'пн', locality: 'Обухів', ...over });
+
+  it('says "курсом на", not "над", for a point that is the destination', () => {
+    const inText = formatThreatNotification({ region, events: [{ stage: 'in', threat: t({ destination: true }) }] });
+    expect(inText).toContain('курсом на Обухів');
+    expect(inText).not.toContain('над Обухів');
+
+    const nearText = formatThreatNotification({ region, events: [{ stage: 'near', threat: t({ destination: true }) }] });
+    expect(nearText).toContain('курсом на Обухів');
+    expect(nearText).not.toContain('курс пн');
+  });
+
+  it('hedges an approximate position', () => {
+    const text = formatThreatNotification({ region, events: [{ stage: 'in', threat: t({ approx: true }) }] });
+    expect(text).toContain('у районі Обухів');
   });
 });

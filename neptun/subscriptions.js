@@ -143,6 +143,16 @@ export function listSubscriptions(chatId) {
 }
 
 /**
+ * Every chat with at least one subscription — the audience for nationwide
+ * events (a MiG-31K take-off has no region to match against).
+ *
+ * @returns {string[]}
+ */
+export function subscribedChats() {
+  return [..._chats.entries()].filter(([, subs]) => subs.size > 0).map(([chatId]) => chatId);
+}
+
+/**
  * Every distinct region anyone subscribes to, with its subscriber chat ids.
  * The watcher evaluates each region once regardless of subscriber count.
  *

@@ -82,3 +82,22 @@ describe('regionFromCacheKey', () => {
     expect(regionFromCacheKey('')).toBeNull();
   });
 });
+
+describe('settingsKeyboard', () => {
+  it('shows one toggle per category with its state, and a payload that fits', async () => {
+    const { settingsKeyboard, CALLBACK_TOGGLE } = await import('../neptun/keyboards.js');
+    const { NOTIFY_CATEGORIES } = await import('../neptun/chatSettings.js');
+    const settings = Object.fromEntries(NOTIFY_CATEGORIES.map((c) => [c.key, c.key !== 'uav']));
+
+    const markup = settingsKeyboard(settings, NOTIFY_CATEGORIES);
+
+    expect(markup.inline_keyboard).toHaveLength(NOTIFY_CATEGORIES.length);
+    const uav = markup.inline_keyboard.find((row) => row[0].callback_data === `${CALLBACK_TOGGLE}|uav`);
+    expect(uav[0].text).toMatch(/^🔕/);
+    expect(markup.inline_keyboard[0][0].text).toMatch(/^✅/);
+    for (const row of markup.inline_keyboard) {
+      expect(Buffer.byteLength(row[0].callback_data, 'utf8')).toBeLessThanOrEqual(64);
+      expect(decodeCallback(row[0].callback_data).action).toBe(CALLBACK_TOGGLE);
+    }
+  });
+});

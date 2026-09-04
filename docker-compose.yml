@@ -68,6 +68,12 @@ services:
       # Optional tuning for live per-target notifications (code defaults used if unset).
       - LIVE_ALERT_TYPES=${LIVE_ALERT_TYPES:-}
       - LIVE_ALERT_KM=${LIVE_ALERT_KM:-}
+      - ADVISORY_QUIET_MS=${ADVISORY_QUIET_MS:-}
+      # Nationwide events from the monitoring-channel feed (see .env.example).
+      - EVENT_CHANNELS=${EVENT_CHANNELS:-}
+      - EVENT_POLL_MS=${EVENT_POLL_MS:-}
+      - EVENT_COOLDOWN_MS=${EVENT_COOLDOWN_MS:-}
+      - EVENT_UAV_COOLDOWN_MS=${EVENT_UAV_COOLDOWN_MS:-}
       # Optional watcher tuning — every env knob the code reads must be listed
       # here, or setting it in .env silently does nothing inside the container.
       - WATCHER_INTERVAL_MS=${WATCHER_INTERVAL_MS:-}

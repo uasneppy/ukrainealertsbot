@@ -191,3 +191,16 @@ describe('subscribedRegions', () => {
     expect(subscribedRegions()).toEqual([]);
   });
 });
+
+describe('subscribedChats', () => {
+  it('lists every chat with at least one subscription, once', async () => {
+    const { subscribedChats } = await import('../neptun/subscriptions.js');
+    subscribe(11, 'київ');
+    subscribe(11, 'харків');
+    subscribe(22, 'одеса');
+    subscribe(33, 'львів');
+    unsubscribe(33);
+
+    expect(subscribedChats().sort()).toEqual(['11', '22']);
+  });
+});

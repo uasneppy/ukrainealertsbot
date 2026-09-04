@@ -43,12 +43,17 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/regionResolver.js` | Free-text Ukrainian region/city → region descriptor |
 | `neptun/regionContext.js` | Per-region threat/alert analysis, report and caption builders |
 | `neptun/subscriptions.js` | Persisted per-chat region subscriptions |
-| `neptun/alertWatcher.js` | Polls subscribed regions; emits alert/all-clear transitions and live per-target events (missiles/ballistics appearing near / entering a region) |
+| `neptun/alertWatcher.js` | Polls subscribed regions; emits alert/all-clear transitions, live per-target events (missiles/ballistics appearing near / entering a region) and once-per-window advisories (a ballistic *risk* over a city) |
 | `neptun/alertState.js` | Last announced state per region, so a restart doesn't swallow transitions |
+| `neptun/eventDetector.js` | Pure: monitoring-channel text → nationwide event kinds (strategic take-off, MiG-31K, Kalibr, drone launch counts) |
+| `neptun/eventWatcher.js` | Polls NEPTUN's channel feed (`/api/v1/messages`) and the MiG-31K marker; announces each kind once per cooldown |
+| `neptun/chatSettings.js` | Persisted per-chat notification categories; `/settings` |
+| `neptun/chatNotifier.js` | Last filter before fan-out: category settings + per-chat dedupe of the same warning arriving by two routes |
+| `neptun/adminGate.js` | Who may change settings: anyone in private, admins only in groups (cached `getChatMember`) |
 | `neptun/messageRouter.js` | Pure: message text → which reply it asks for |
 | `neptun/keyboards.js` | Inline buttons and their 64-byte callback payloads |
 | `neptun/statusReport.js` | /status — makes the deliberately-silent degradations visible |
-| `neptun/threatIcons.js`, `defaultIcons.js`, `threatMeta.js` | Marker icons and per-type metadata |
+| `neptun/threatIcons.js`, `defaultIcons.js`, `threatMeta.js` | Marker icons and per-type metadata; `threatNature` tells an advisory from a tracked object |
 | `fetchWithTimeout.js` | Every outbound HTTP call goes through this |
 | `telegramSender.js` | Paced, retrying queue for unprompted fan-out (alert notifications) |
 
@@ -72,6 +77,18 @@ say something outdated.
 **Bias asymmetrically.** Alerts go out immediately; all-clears must be
 confirmed. The costs of the two mistakes are not symmetric, and the code should
 show that they were weighed.
+
+**A warning is not a missile.** NEPTUN uses the same threat types for a tracked
+object («Крилата ракета» with a trail) and for a risk («Балістична загроза»
+placed over a city, a `mig31k` marker meaning "it took off"). Read as an
+object, an advisory became "балістика наближається, ~40 км" for a missile
+nobody had launched. `threatNature()` in `threatMeta.js` makes the call once;
+advisories are phrased as a risk, said once per region per quiet window, and
+MiG-31K is a nationwide event, never a per-region target. `destination: true`
+means the point is where a target is *heading*, so it reads "курсом на", not
+"над". Nationwide events come from text (`eventDetector.js`) and are judged
+sentence by sentence, conservatively: a missed take-off is covered by the
+siren that follows; a false "Kalibr launched" gets the bot muted.
 
 **Everything outbound needs a deadline.** Use `fetchWithTimeout`. A bare `fetch`
 against a half-open connection never settles and can wedge a whole code path.
@@ -116,5 +133,6 @@ snapshot read as an all-clear); those are the ones worth preserving carefully.
 ## Deployment
 
 `docker compose up -d --build`. Two volumes: `geo-cache` for boundary GeoJSON,
-`subscriptions` for `/app/data` — the second holds user data, and losing it is
+`subscriptions` for `/app/data` — the second holds user data (subscriptions,
+per-chat notification settings, last announced alert state), and losing it is
 silent, so never remove it as "just a cache".
