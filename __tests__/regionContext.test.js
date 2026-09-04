@@ -226,8 +226,17 @@ describe('report and caption builders', () => {
     const status = buildRegionStatus({ region: oblastRegion, threats: manyThreats, alerts, geo });
     const caption = buildFocusCaption(status, new Date('2026-07-18T18:30:00Z'));
     expect(caption.length).toBeLessThanOrEqual(1024);
-    expect(caption).toContain('🗺 NEPTUN — Тестова область');
+    expect(caption).toContain('<b>NEPTUN — Тестова область</b>');
     expect(caption).toContain('© neptun.in.ua');
+  });
+
+  it('escapes feed strings in the HTML caption but keeps the report plain for the prompt', () => {
+    const threats = [{ id: 'x', type: 'uav', title: 'БпЛА', lat: 50.5, lon: 30.5, locality: 'Село <b>' }];
+    const status = buildRegionStatus({ region: oblastRegion, threats, alerts, geo });
+    expect(buildFocusCaption(status)).toContain('Село &lt;b&gt;');
+    expect(formatRegionReport(status)).toContain('Село <b>');
+    expect(formatRegionReport(status)).not.toContain('</b>');
+    expect(formatRegionReport(status, { html: true })).toContain('<b>');
   });
 });
 

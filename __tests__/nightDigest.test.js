@@ -10,6 +10,7 @@ import {
 } from '../neptun/nightDigest.js';
 import { resolveRegion } from '../neptun/regionResolver.js';
 import { buildNightPrompt } from '../geminiAnalysis.js';
+import { stripHtml } from '../neptun/telegramFormat.js';
 
 const KYIV = resolveRegion('київ');
 const NOW = Date.parse('2026-09-04T23:00:00Z'); // 02:00 Kyiv → window since 15:00 UTC
@@ -79,7 +80,7 @@ describe('buildNightFacts', () => {
   });
 
   it('renders the caption line, the facts text and the fallback from the same facts', () => {
-    const line = formatNightLine(facts);
+    const line = stripHtml(formatNightLine(facts));
     expect(line).toContain('🌙 За ніч (з 18:00) — над регіоном: БпЛА 6');
     expect(line).toContain('поблизу: Ракета 1');
     expect(line).toContain('⚠️ попереджень: 1');
@@ -92,7 +93,7 @@ describe('buildNightFacts', () => {
     expect(text).toContain('Київщина: БпЛА курсом на Бровари');
     expect(text).not.toContain('Сумщина');
 
-    const fallback = formatNightFallback(facts);
+    const fallback = stripHtml(formatNightFallback(facts));
     expect(fallback).toContain('🌙 Київ — за ніч');
     expect(fallback).toContain('пуски ударних БпЛА: ≈35');
     expect(fallback).toContain('/map Київ');
@@ -100,8 +101,8 @@ describe('buildNightFacts', () => {
 
   it('says so when the night was quiet', () => {
     const quiet = buildNightFacts({ region: KYIV, log: fakeLog(), geo: {}, now: NOW });
-    expect(formatNightLine(quiet)).toContain('цілей над регіоном не зафіксовано');
-    expect(formatNightFallback(quiet)).toContain('цілей не зафіксовано');
+    expect(stripHtml(formatNightLine(quiet))).toContain('цілей над регіоном не зафіксовано');
+    expect(stripHtml(formatNightFallback(quiet))).toContain('цілей не зафіксовано');
   });
 
   it('fingerprints change when something new comes in', () => {
@@ -122,7 +123,7 @@ describe('buildNightPrompt', () => {
     expect(prompt).toContain('«Київ»');
     expect(prompt).toContain('над регіоном: БпЛА 6');
     expect(prompt).toContain('ТІЛЬКИ на наведені дані');
-    expect(prompt).toContain('Без markdown');
-    expect(prompt).toContain('🌙 Київ — за ніч');
+    expect(prompt).toContain('жодного markdown');
+    expect(prompt).toContain('<b>Київ — за ніч</b>');
   });
 });

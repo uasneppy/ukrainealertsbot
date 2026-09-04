@@ -126,8 +126,9 @@ describe('channelMessages utilities', () => {
     });
 
     it('enumerates provided messages in order', () => {
-      const result = formatChannelMessages(['Перше', 'Друге']);
-      expect(result).toBe('Останні повідомлення з каналу @kpszsu:\n\n1. Перше\n\n2. Друге');
+      const result = formatChannelMessages(['Перше', 'Друге <b>']);
+      // Telegram HTML: numbered bold, post text italic, third-party text escaped.
+      expect(result).toBe('📢 <b>Останні повідомлення з каналу @kpszsu</b>\n\n<b>1.</b> <i>Перше</i>\n\n<b>2.</b> <i>Друге &lt;b&gt;</i>');
     });
 
     it('throws when messages is not an array', () => {

@@ -24,6 +24,7 @@ import { THREAT_EMOJI, THREAT_NAMES_UA } from './threatMeta.js';
 import { detectEvents, EVENT_KINDS } from './eventDetector.js';
 import { relevantRegionKeys, messageConcerns } from './regionMentions.js';
 import { nightWindow } from './nightLog.js';
+import { esc, b, i } from './telegramFormat.js';
 
 const NEAR_KM = 90;
 /** Repeated reports of one launch wave within this window are one wave. */
@@ -136,21 +137,21 @@ function notableEvents(events) {
   return [...seen.values()].map((ev) => `${short[ev.kind] ?? ev.kind} ${fmtKyivTime(new Date(ev.at).toISOString())}`);
 }
 
-/** The one- or two-line block under a region map caption. */
+/** The one- or two-line block under a region map caption (Telegram HTML). */
 export function formatNightLine(facts) {
   const inText = tallyText(facts.tally.in);
   const nearText = tallyText(facts.tally.near);
-  const head = `🌙 За ніч (${facts.window.label})`;
+  const head = `🌙 ${b(`За ніч (${facts.window.label})`)}`;
   const parts = [];
-  if (inText) parts.push(`над регіоном: ${inText}`);
-  if (nearText) parts.push(`поблизу: ${nearText}`);
+  if (inText) parts.push(`над регіоном: ${esc(inText)}`);
+  if (nearText) parts.push(`поблизу: ${esc(nearText)}`);
   if (facts.advisories.length) parts.push(`⚠️ попереджень: ${facts.advisories.length}`);
   const line1 = parts.length ? `${head} — ${parts.join(' · ')}` : `${head} — цілей над регіоном не зафіксовано`;
 
   const second = [];
   if (facts.uavLaunched) second.push(`пуски БпЛА ≈${facts.uavLaunched}`);
   second.push(...notableEvents(facts.events).slice(0, 3));
-  const line2 = second.length ? `📡 За повідомленнями: ${second.join(' · ')}` : '';
+  const line2 = second.length ? `📡 ${i('За повідомленнями:')} ${esc(second.join(' · '))}` : '';
   return [line1, line2].filter(Boolean).join('\n');
 }
 
@@ -188,29 +189,31 @@ export function describeNightFacts(facts, { maxMessages = 60, maxEvents = 25 } =
   return lines.join('\n');
 }
 
-/** Digest without AI: the numbers and the latest posts, plainly. */
+/** Digest without AI: the numbers and the latest posts, plainly (Telegram HTML). */
 export function formatNightFallback(facts, { maxPosts = 6 } = {}) {
-  const lines = [`🌙 ${facts.region.name} — за ніч (${facts.window.label})`, ''];
-  lines.push(`🛰 За даними NEPTUN:`);
-  lines.push(`• над регіоном: ${tallyText(facts.tally.in) || 'цілей не зафіксовано'}`);
+  const lines = [`🌙 ${b(`${facts.region.name} — за ніч`)} ${i(`(${facts.window.label})`)}`, ''];
+  lines.push(`🛰 ${b('За даними NEPTUN')}`);
+  lines.push(`  • над регіоном: ${esc(tallyText(facts.tally.in) || 'цілей не зафіксовано')}`);
   const near = tallyText(facts.tally.near);
-  if (near) lines.push(`• поблизу: ${near}`);
-  if (facts.advisories.length) lines.push(`• ⚠️ попереджень над регіоном: ${facts.advisories.length}`);
+  if (near) lines.push(`  • поблизу: ${esc(near)}`);
+  if (facts.advisories.length) lines.push(`  • ⚠️ попереджень над регіоном: ${facts.advisories.length}`);
   const notable = notableEvents(facts.events);
   if (facts.uavLaunched || notable.length) {
     lines.push('');
-    lines.push('📡 За повідомленнями каналів:');
-    if (facts.uavLaunched) lines.push(`• пуски ударних БпЛА: ≈${facts.uavLaunched}`);
-    for (const n of notable.slice(0, 5)) lines.push(`• ${n}`);
+    lines.push(`📡 ${b('За повідомленнями каналів')}`);
+    if (facts.uavLaunched) lines.push(`  • пуски ударних БпЛА: ≈${facts.uavLaunched}`);
+    for (const n of notable.slice(0, 5)) lines.push(`  • ${esc(n)}`);
   }
   const posts = facts.regionMessages.slice(0, maxPosts);
   if (posts.length) {
     lines.push('');
-    lines.push(`💬 Останнє про регіон (${facts.regionMessages.length} повідомлень):`);
-    for (const m of posts) lines.push(`• ${fmt(m.at)} ${m.channel}: ${m.text.replace(/\s+/g, ' ').slice(0, 140)}`);
+    lines.push(`💬 ${b('Останнє про регіон')} ${i(`(${facts.regionMessages.length} повідомлень)`)}`);
+    for (const m of posts) {
+      lines.push(`  • ${fmt(m.at)} ${esc(m.channel)}: ${i(m.text.replace(/\s+/g, ' ').slice(0, 140))}`);
+    }
   }
   lines.push('');
-  lines.push(`🗺 Зараз: /map ${facts.region.name}`);
+  lines.push(`🗺 Зараз: /map ${esc(facts.region.name)}`);
   return lines.join('\n');
 }
 

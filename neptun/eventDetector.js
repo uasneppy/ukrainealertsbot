@@ -18,6 +18,8 @@
 
 // Ukrainian keywords accept a Latin "i" inside Cyrillic words — channels type
 // it often enough — and the Russian spellings the hyperlocal channels use.
+import { esc, b, i } from './telegramFormat.js';
+
 const I = '[іi]';
 const B = '(?<![а-яіїєґa-z])'; // word start; JS \b is ASCII-only
 
@@ -215,11 +217,17 @@ export function quoteMessage(text, maxLen = 280) {
 export function formatEventNotification({ kind, count = null, quote = '', channel = '', date = null }) {
   const meta = EVENT_KINDS[kind] ?? { emoji: '📡', title: kind };
   const headCount = count != null ? (kind === 'uav_launch' ? ` — ≈${count}` : ` (×${count})`) : '';
-  const lines = [`${meta.emoji} ${meta.title}${headCount}`];
-  if (quote) lines.push(`«${quote}»`);
+  const lines = [`${meta.emoji} ${b(meta.title)}${esc(headCount)}`];
+  if (quote) {
+    lines.push('');
+    lines.push(i(`«${quote}»`));
+  }
   const time = date ? fmtTime(date) : '';
   const source = [channel, time].filter(Boolean).join(' · ');
-  if (source) lines.push(`📡 ${source}`);
+  if (source) {
+    lines.push('');
+    lines.push(`📡 ${esc(source)}`);
+  }
   return lines.join('\n');
 }
 

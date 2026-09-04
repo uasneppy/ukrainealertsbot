@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { detectEvents, formatEventNotification, quoteMessage, EVENT_KINDS } from '../neptun/eventDetector.js';
+import { stripHtml } from '../neptun/telegramFormat.js';
 
 const kinds = (text) => detectEvents(text).map((e) => e.kind);
 const one = (text) => {
@@ -175,12 +176,18 @@ describe('quoteMessage / formatEventNotification', () => {
     const text = formatEventNotification({
       kind: 'strategic_takeoff', count: 7, quote: 'Зліт 7 бортів', channel: '@kpszsu', date: '2026-09-04T19:07:13Z',
     });
-    expect(text).toContain('✈️ Зліт стратегічної авіації (×7)');
-    expect(text).toContain('«Зліт 7 бортів»');
+    expect(stripHtml(text)).toContain('✈️ Зліт стратегічної авіації (×7)');
+    expect(text).toContain('<i>«Зліт 7 бортів»</i>');
     expect(text).toContain('@kpszsu · 22:07');
   });
 
   it('phrases a drone count as an approximate number', () => {
-    expect(formatEventNotification({ kind: 'uav_launch', count: 30 })).toContain('Пуски ударних БпЛА — ≈30');
+    expect(stripHtml(formatEventNotification({ kind: 'uav_launch', count: 30 }))).toContain('Пуски ударних БпЛА — ≈30');
+  });
+
+  it('escapes markup in a quoted post so Telegram never rejects the message', () => {
+    const text = formatEventNotification({ kind: 'kalibr_launch', quote: 'Пуск <2> Калібрів & ще', channel: '@kpszsu' });
+    expect(text).toContain('&lt;2&gt;');
+    expect(text).toContain('&amp;');
   });
 });

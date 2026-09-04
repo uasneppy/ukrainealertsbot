@@ -15,7 +15,7 @@ describe('buildRegionPrompt', () => {
     expect(prompt).toContain('🔴 Тривога у м. Київ (з 21:05)');
     expect(prompt).toContain('1. Пуски КР з Ту-95МС');
     expect(prompt).toContain('2. БпЛА курсом на Київ');
-    expect(prompt).toContain('без markdown');
+    expect(prompt).toContain('жодного markdown');
   });
 
   it('caps channel messages at 15 items and 400 chars each', () => {

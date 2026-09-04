@@ -12,6 +12,7 @@ import {
   formatAdvisoryNotification,
 } from '../neptun/alertWatcher.js';
 import { resolveRegion } from '../neptun/regionResolver.js';
+import { stripHtml } from '../neptun/telegramFormat.js';
 
 const KYIV_OBLAST = resolveRegion('київська область');
 const GEO = { oblasts: { type: 'FeatureCollection', features: [] }, raions: { type: 'FeatureCollection', features: [] } };
@@ -229,7 +230,8 @@ describe('formatAlertNotification', () => {
       status: { threatsIn: [{ name: 'БпЛА' }, { name: 'БпЛА' }, { name: 'Ракета' }] },
     });
 
-    expect(text).toContain('🔴 Повітряна тривога — Київська область');
+    expect(stripHtml(text)).toContain('🔴 Повітряна тривога — Київська область');
+    expect(text).toContain('<b>Повітряна тривога</b>');
     expect(text).toContain('БпЛА ×2');
     expect(text).toContain('Ракета ×1');
   });
@@ -247,14 +249,14 @@ describe('formatAlertNotification', () => {
   it('omits the threat line when nothing is in the region', () => {
     const text = formatAlertNotification({ region, active: true, status: { threatsIn: [] } });
 
-    expect(text).toContain('🔴 Повітряна тривога');
+    expect(stripHtml(text)).toContain('🔴 Повітряна тривога');
     expect(text).not.toContain('У регіоні:');
   });
 
   it('is a single short line for the all-clear', () => {
     const text = formatAlertNotification({ region, active: false, status: {} });
 
-    expect(text).toBe('🟢 Відбій тривоги — Київська область');
+    expect(stripHtml(text)).toBe('🟢 Відбій тривоги — Київська область');
   });
 });
 
@@ -499,7 +501,7 @@ describe('formatThreatNotification', () => {
 
   it('phrases a single approaching target urgently', () => {
     const text = formatThreatNotification({ region, events: [{ stage: 'near', threat: t() }] });
-    expect(text).toContain('🚀 Ракета — Київ');
+    expect(stripHtml(text)).toContain('🚀 Ракета — Київ');
     expect(text).toContain('наближається');
     expect(text).toContain('80 км');
     expect(text).toContain('/map Київ');
@@ -686,16 +688,16 @@ describe('formatAdvisoryNotification', () => {
 
   it('reads as a warning about a risk, with NEPTUN\'s own words and the map hint', () => {
     const text = formatAdvisoryNotification({ region, events: [{ threat }] });
-    expect(text).toContain('⚠️ 💥 Загроза балістики — Київ');
+    expect(stripHtml(text)).toContain('⚠️ 💥 Загроза балістики — Київ');
     expect(text).toContain('Висока ймовірність балістичного удару.');
     expect(text).toContain('не зафіксований пуск');
     expect(text).toContain('/map Київ');
-    expect(text).not.toMatch(/над Київ|наближається|км/);
+    expect(stripHtml(text)).not.toMatch(/над Київ|наближається|км/);
   });
 
   it('copes without an explanation', () => {
     const text = formatAdvisoryNotification({ region, events: [{ threat: { ...threat, explanationShort: '' } }] });
-    expect(text.split('\n')[1]).toContain('попередження про ризик');
+    expect(text.split('\n').filter(Boolean)[1]).toContain('попередження про ризик');
   });
 });
 
