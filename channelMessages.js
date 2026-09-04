@@ -149,3 +149,58 @@ export function formatChannelMessages(messages, channelLabel = '@kpszsu') {
   const body = messages.map((message, index) => `${index + 1}. ${message}`).join('\n\n');
   return `Останні повідомлення з каналу ${channelLabel}:\n\n${body}`;
 }
+
+// ── Dated messages for the night log ─────────────────────────────────────────
+// The digest needs *when* a post was made, not just its text. Each message on
+// a t.me preview page sits in a wrapper carrying `data-post="channel/id"` and a
+// `<time datetime="…">`; this reads those alongside the text.
+
+const MESSAGE_WRAP_RE = /<div class="tgme_widget_message_wrap[\s\S]*?(?=<div class="tgme_widget_message_wrap|<\/section>|$)/gi;
+const POST_ID_RE = /data-post="([^"\/]+)\/(\d+)"/i;
+const TIME_RE = /<time[^>]*datetime="([^"]+)"/i;
+
+/**
+ * @returns {Array<{ id: string, channel: string, text: string, date: string|null }>}
+ *          oldest first, as on the page
+ */
+export function extractDatedMessages(html) {
+  if (typeof html !== 'string') throw new Error('html must be a string');
+  const out = [];
+  for (const block of html.match(MESSAGE_WRAP_RE) ?? []) {
+    const textMatch = new RegExp(MESSAGE_SELECTOR_REGEX.source, 'i').exec(block);
+    if (!textMatch) continue;
+    const text = cleanMessageText(textMatch[1]);
+    if (!text) continue;
+    const post = POST_ID_RE.exec(block);
+    const time = TIME_RE.exec(block);
+    out.push({
+      id: post ? `${post[1]}/${post[2]}` : '',
+      channel: post ? `@${post[1]}` : '',
+      text,
+      date: time ? new Date(time[1]).toISOString() : null,
+    });
+  }
+  return out;
+}
+
+/** Fetches a public channel's preview page and returns its dated messages. */
+export async function fetchChannelFeed(handle, { fetchFn = globalThis.fetch, timeoutMs = CHANNEL_TIMEOUT_MS } = {}) {
+  const name = String(handle ?? '').replace(/^@/, '').trim();
+  if (!name) throw new Error('channel handle is required');
+  const response = await fetchWithTimeout(`https://t.me/s/${name}`, {
+    fetchFn,
+    timeoutMs,
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (compatible; UkraineAlertsBot/1.0; +https://github.com/uasneppy/ukrainealertsbot)',
+      'Accept-Language': 'uk,en;q=0.8',
+    },
+  });
+  if (!response?.ok) throw new Error(`Failed to load @${name} (status ${response?.status ?? 'unknown'})`);
+  const html = await response.text();
+  const messages = extractDatedMessages(html);
+  if (!messages.length && html.length > 0) {
+    console.warn(`[channelMessages] @${name} returned ${html.length} bytes but no messages — markup may have changed`);
+  }
+  return messages.map((m) => ({ ...m, channel: m.channel || `@${name}` }));
+}

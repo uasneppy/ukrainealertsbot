@@ -46,6 +46,7 @@ export function createEventWatcher({
   fetchMessages,
   getSnapshot = null,
   notify,
+  onMessages = null,     // (messages) => void — every fetched post, any channel; feeds the night log
   hasAudience = () => true,
   channels = DEFAULT_EVENT_CHANNELS,
   cooldownMs = DEFAULT_EVENT_COOLDOWN_MS,
@@ -101,6 +102,13 @@ export function createEventWatcher({
     }
 
     if (messages) {
+      if (onMessages) {
+        try {
+          onMessages(messages);
+        } catch (err) {
+          log.error?.('[event-watcher] onMessages failed:', err?.message ?? err);
+        }
+      }
       const fresh = messages.filter((m) => {
         if (!allowAll && !channelSet.has(normalizeChannel(m.channel))) return false;
         const at = Date.parse(m.date ?? '');
@@ -117,14 +125,17 @@ export function createEventWatcher({
         seeded = true; // whatever was already in the feed is not news
       } else {
         for (const m of unseen) {
-          for (const { kind, count } of detect(m.text)) {
+          for (const { kind, count, sentence } of detect(m.text)) {
             if (!EVENT_KINDS[kind] || !announceable(kind, t)) continue;
             lastAnnouncedAt.set(kind, t);
+            // Quote the sentence that triggered the event, not the whole post:
+            // a long message quoted whole was a truncated wall of bullets.
+            const quote = sentence ? quoteMessage(sentence) : quoteMessage(m.text);
             announced.push({
               kind,
               category: EVENT_KINDS[kind].category,
               count,
-              quote: quoteMessage(m.text),
+              quote,
               channel: normalizeChannel(m.channel),
               date: m.date ?? null,
             });

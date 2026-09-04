@@ -14,6 +14,8 @@ export const CALLBACK_SUBSCRIBE = 's';
 export const CALLBACK_UNSUBSCRIBE = 'u';
 /** Toggle one notification category; the payload after '|' is its key. */
 export const CALLBACK_TOGGLE = 't';
+/** The night digest for a region — what flew over it since the evening. */
+export const CALLBACK_NIGHT = 'n';
 
 const MAX_CALLBACK_BYTES = 64;
 
@@ -33,9 +35,10 @@ export function decodeCallback(data) {
  * @param {object} opts
  * @param {string|null} opts.cacheKey    region key, or null for the national map
  * @param {boolean} opts.subscribed      whether this chat already follows it
+ * @param {boolean} opts.night           offer the night digest (region maps only)
  * @returns {object|undefined} reply_markup, or undefined when no button fits
  */
-export function mapKeyboard({ cacheKey = null, subscribed = false } = {}) {
+export function mapKeyboard({ cacheKey = null, subscribed = false, night = false } = {}) {
   const row = [];
 
   const refresh = encodeCallback(CALLBACK_REFRESH, cacheKey ?? '');
@@ -49,7 +52,12 @@ export function mapKeyboard({ cacheKey = null, subscribed = false } = {}) {
     }
   }
 
-  return row.length ? { inline_keyboard: [row] } : undefined;
+  const rows = row.length ? [row] : [];
+  if (cacheKey && night) {
+    const data = encodeCallback(CALLBACK_NIGHT, cacheKey);
+    if (data) rows.push([{ text: '🌙 Що було за ніч', callback_data: data }]);
+  }
+  return rows.length ? { inline_keyboard: rows } : undefined;
 }
 
 /**

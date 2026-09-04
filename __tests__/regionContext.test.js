@@ -257,3 +257,16 @@ describe('advisories and destinations in reports', () => {
     expect(formatRegionReport(status)).toContain('БпЛА · курсом на Обухів');
   });
 });
+
+describe('buildFocusCaption extra block', () => {
+  it('includes the extra block before the footer and still fits the limit', async () => {
+    const { buildFocusCaption } = await import('../neptun/regionContext.js');
+    const threats = Array.from({ length: 12 }, (_, i) => ({ id: `t${i}`, type: 'uav', title: 'БпЛА', lat: 50.5 + i * 0.01, lon: 30.5, locality: `Село-${i}` }));
+    const status = buildRegionStatus({ region: oblastRegion, threats, alerts: {}, geo });
+    const extra = '🌙 За ніч (з 18:00) — над регіоном: БпЛА 14 · Ракета 2\n📡 За повідомленнями: пуски БпЛА ≈60';
+    const caption = buildFocusCaption(status, new Date('2026-09-04T20:00:00Z'), { extra });
+    expect(caption).toContain(extra);
+    expect(caption.indexOf(extra)).toBeLessThan(caption.indexOf('за Києвом'));
+    expect(caption.length).toBeLessThanOrEqual(1024);
+  });
+});

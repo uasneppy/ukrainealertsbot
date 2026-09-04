@@ -47,6 +47,10 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/alertState.js` | Last announced state per region, so a restart doesn't swallow transitions |
 | `neptun/eventDetector.js` | Pure: monitoring-channel text → nationwide event kinds (strategic take-off, MiG-31K, Kalibr, drone launch counts) |
 | `neptun/eventWatcher.js` | Polls NEPTUN's channel feed (`/api/v1/messages`) and the MiG-31K marker; announces each kind once per cooldown |
+| `neptun/nightLog.js` | The bot's memory of the night: every NEPTUN track (with trail and swarm size) and every channel post (with mentioned regions), persisted to the data volume |
+| `neptun/nightDigest.js` | Facts for a region's night from the log (track tallies by geometry, launch waves, relevant posts), the caption line, the Gemini prompt body and the no-AI fallback |
+| `neptun/regionMentions.js` | Which regions a channel post mentions, via the resolver; computed once at record time |
+| `neptun/channelPoller.js` | Polls extra public channels through their t.me preview for the night log (never for pushes) |
 | `neptun/chatSettings.js` | Persisted per-chat notification categories; `/settings` |
 | `neptun/chatNotifier.js` | Last filter before fan-out: category settings + per-chat dedupe of the same warning arriving by two routes |
 | `neptun/adminGate.js` | Who may change settings: anyone in private, admins only in groups (cached `getChatMember`) |
@@ -110,6 +114,13 @@ views (`mock`, a city, an oblast) before believing it looks right.
 **Ukrainian text is user-facing.** Region names are stored in the nominative;
 don't interpolate them into sentences that need another case ("тривога в
 Київська область" is wrong). Use a command form or the resolver's own phrasing.
+
+**AI reads; it never wakes anyone.** Gemini summarises the night's posts for
+a region («що за ніч у києві») because they are terse, slangy and
+contradictory — exactly what a regex can't read. It is given only facts from
+the night log and told to add nothing. Push notifications stay regex-driven:
+a hallucinated "Kalibr launched" at 3 a.m. gets the bot muted, and a muted bot
+warns nobody. Without a key the same facts go out un-summarised.
 
 **Degrade, don't apologise.** A render can fail while the answer is perfectly
 well known — `formatRegionReport` and `buildNationalReport` say it in text.

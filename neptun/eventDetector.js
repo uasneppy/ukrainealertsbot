@@ -37,15 +37,26 @@ const SUBJECT = {
 // hyperlocal channel narrating a drone that is already here, not a launch.
 const LAUNCH_RE   = re(`${B}(?:за)?пуск|${B}старт(?:ув|ов|$)|${B}в${I}дстр${I}л|${B}запущен|${B}випущен|${B}выпущен`);
 const TAKEOFF_RE  = re(`${B}зл${I}т|${B}зльот|${B}зл${I}та|${B}злет${I}л|${B}взлет|${B}взлёт|${B}п${I}дн(?:ял|ят)|${B}поднял|${B}вил${I}т|${B}вылет|у? ?пов${I}тр${I}|в воздухе`);
-const AIRCRAFT_ACTIVITY_RE = re(`${B}активн${I}сть|${B}активность`);
+const AIRCRAFT_ACTIVITY_RE = re(`${B}активн${I}сть|${B}активность|${B}активн[аі]`);
 const AT_SEA_RE   = re(`${B}вийш|${B}вихід|${B}вывед|${B}вывел|${B}вышл|${B}вивед|${B}вивел|${B}у мор|${B}в мор|${B}на бойов`);
 const THREAT_RE   = re(`${B}загроз|${B}угроз|${B}ризик|${B}риск|${B}можлив|${B}ймов${I}рн|${B}вероятн|${B}не виключ`);
 const COURSE_RE   = re(`${B}курс|${B}на (?:київ|ки[їі]в|одес|дн${I}пр|харк${I}в|запор|микола|льв${I}в|полтав|черн|суми|житомир|в${I}нниц|кременчу|кривий)`);
 
 // A sentence that says it did NOT happen, or that it is over, is dropped whole.
-const NEGATION_RE = re(`${B}не (?:заф${I}ксов|було|п${I}дтвердж|спостер|зазнач|фиксир|было|подтвержд)|${B}без (?:за)?пуск|в${I}дсутн|отсутств|спростов|опроверг|фейк|${B}минул|${B}знят|${B}в${I}дб${I}й|${B}отбой|скасов|отмен|${B}зак${I}нч|${B}заверш|${B}посадк|${B}приземл|${B}с${I}в на|${B}сели на|${B}сіли на|${B}повернул|${B}вернул`);
+const NEGATION_RE = re(`${B}не (?:заф${I}ксов|було|п${I}дтвердж|спостер|зазнач|фиксир|было|подтвержд|активн)|${B}неактивн|${B}без (?:за)?пуск|в${I}дсутн|отсутств|спростов|опроверг|фейк|${B}минул|${B}знят|${B}в${I}дб${I}й|${B}отбой|скасов|отмен|${B}зак${I}нч|${B}заверш|${B}посадк|${B}приземл|${B}с${I}в на|${B}сели на|${B}сіли на|${B}повернул|${B}вернул`);
 
 const SENTENCE_SPLIT_RE = /[.!?\n]+|(?<=\S)\s+[—–-]\s+(?=[А-ЯІЇЄҐ])/u;
+
+// Periodic situation digests («Ситуація станом на 00:00», «Підсумок доби»)
+// restate the whole night every hour: "пуски ударних БпЛА зафіксовано" in
+// one is a summary of launches already announced, not a new launch. Quoting
+// it also produced a truncated wall of bullet points. Digests are not an
+// event source; the same channels post the events themselves separately.
+const DIGEST_RE = /ситуац[іi][яї].{0,60}станом на|станом на \d{1,2}[:.]\d{2}|п[іi]дсум|впродовж доби|за (?:минулу )?добу|за н[іi]ч\b/iu;
+
+// Leading bullets and emoji on a quoted sentence are the channel's layout,
+// not its words.
+const SENTENCE_PREFIX_RE = /^[\s•·\-–—*▪◾◼◻◽\p{Extended_Pictographic}\uFE0F\u200D]+/u;
 
 /** Per-kind metadata: which chat category it belongs to, and how it is titled. */
 export const EVENT_KINDS = Object.freeze({
@@ -147,21 +158,28 @@ function detectInSentence(s) {
   return [...kinds].map((kind) => ({ kind, count, sentence: s }));
 }
 
+/** True for a periodic status summary, which restates rather than reports. */
+export function isDigest(text) {
+  return DIGEST_RE.test(String(text ?? '').slice(0, 200));
+}
+
 /**
  * @param {string} text  Raw channel message.
  * @returns {Array<{ kind: string, count: number|null, sentence: string }>}
  *          Distinct kinds in the order found; count is the first number that
- *          reads as a quantity (or null).
+ *          reads as a quantity (or null); sentence is the triggering sentence
+ *          in the channel's own casing, for quoting.
  */
 export function detectEvents(text) {
-  const norm = normalizeText(text);
-  if (!norm) return [];
+  const raw = String(text ?? '');
+  if (!raw.trim() || isDigest(raw)) return [];
   const found = new Map();
-  for (const raw of norm.split(SENTENCE_SPLIT_RE)) {
-    const s = raw.trim();
+  for (const piece of raw.split(SENTENCE_SPLIT_RE)) {
+    const original = piece.replace(SENTENCE_PREFIX_RE, '').trim();
+    const s = normalizeText(original);
     for (const ev of detectInSentence(s)) {
       const prev = found.get(ev.kind);
-      if (!prev || (prev.count == null && ev.count != null)) found.set(ev.kind, ev);
+      if (!prev || (prev.count == null && ev.count != null)) found.set(ev.kind, { ...ev, sentence: original });
     }
   }
   return [...found.values()];
@@ -171,14 +189,22 @@ export function detectEvents(text) {
 // part of the warning and would be quoted into every notification.
 const BOILERPLATE_LINE_RE = /підпис|подпис|зв.?язок|додаток|підтрим|поддерж|донат|t\.me\/|https?:\/\/|^\s*[✙@#]|^\s*[\p{Emoji}\s]+$/iu;
 
-/** The message with boilerplate removed, trimmed for quoting. */
+/**
+ * The message with boilerplate removed, trimmed for quoting. A cut lands on a
+ * line or sentence boundary where one exists — a quote that stops mid-word
+ * reads as a broken bot, not a long message.
+ */
 export function quoteMessage(text, maxLen = 280) {
   const lines = String(text ?? '')
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !BOILERPLATE_LINE_RE.test(l));
   const joined = lines.join('\n').trim();
-  return joined.length > maxLen ? `${joined.slice(0, maxLen - 1).trimEnd()}…` : joined;
+  if (joined.length <= maxLen) return joined;
+  const head = joined.slice(0, maxLen - 1);
+  const boundary = Math.max(head.lastIndexOf('\n'), head.lastIndexOf('. '), head.lastIndexOf('! '));
+  const cut = boundary > maxLen / 3 ? head.slice(0, boundary + 1) : head;
+  return `${cut.trimEnd()}…`;
 }
 
 /**

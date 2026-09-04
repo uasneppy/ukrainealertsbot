@@ -26,6 +26,8 @@ const ago = (timestamp, now) => {
  * @param {number}  facts.subscriptions subscriptions for the asking chat
  * @param {number}  facts.watchedRegions distinct regions the watcher polls
  * @param {object|null} [facts.eventFeed] from eventWatcher.stats(); null when disabled
+ * @param {{ tracks: number, messages: number }} [facts.nightLog]
+ * @param {object|null} [facts.extraChannels] channelPoller.stats(): handle → { lastOkAt, lastError }
  * @param {number}  [facts.now]
  */
 export function formatStatusReport(facts = {}) {
@@ -85,6 +87,18 @@ export function formatStatusReport(facts = {}) {
     } else {
       const last = feed.lastEventAt ? `, остання подія ${ago(feed.lastEventAt, now)}` : '';
       lines.push(`🟢 Стрічка подій: опитано ${ago(feed.lastOkAt, now)}, подій: ${feed.announced ?? 0}${last}`);
+    }
+  }
+  if (facts.nightLog) {
+    lines.push(`🌙 Нічний журнал: треків ${facts.nightLog.tracks ?? 0}, повідомлень ${facts.nightLog.messages ?? 0}`);
+  }
+  if (facts.extraChannels && Object.keys(facts.extraChannels).length) {
+    // One line per channel: the t.me preview dies per channel, not all at once.
+    for (const [handle, s] of Object.entries(facts.extraChannels)) {
+      if (s.lastError && !s.lastOkAt) lines.push(`🔴 ${handle}: ${s.lastError}`);
+      else if (s.lastError) lines.push(`🟠 ${handle}: останній успіх ${ago(s.lastOkAt, now)} — ${s.lastError}`);
+      else if (s.lastOkAt) lines.push(`🟢 ${handle}: опитано ${ago(s.lastOkAt, now)}`);
+      else lines.push(`⚪ ${handle}: ще не опитувався`);
     }
   }
   lines.push(`🔔 Підписки цього чату: ${facts.subscriptions ?? 0}`);

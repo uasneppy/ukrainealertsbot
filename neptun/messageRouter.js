@@ -14,6 +14,7 @@
  *   "чому тривога в києві" / "чому київ"  → region why
  *   "чому тривога"                       → channel summary
  *   "тривога"                            → national map
+ *   "що за ніч київ" / "ніч харків"      → region night digest
  *
  * The bare-region forms use resolveRegionStrict, which fires only when the
  * whole message is a region — so "їду в київ" or "харків тримайся" (a city
@@ -24,6 +25,11 @@ import { parseRegionQuery, resolveRegion, resolveRegionStrict } from './regionRe
 
 // JS \b is ASCII-only and never matches around Cyrillic; use lookarounds.
 const WHY_RE = /(?<![а-яґєіїa-z])(?:чому|чого|почему)(?![а-яґєіїa-z])/u;
+// "за ніч", "вночі", "ніч", "ночі" — a question about the night rather than
+// now. "нічого" must not match (ніч-о-го), hence the explicit forms.
+const NIGHT_RE = /(?<![а-яґєіїa-z])(?:за ніч|вночі|ніч|ночі|ночью|за ночь)(?![а-яґєіїa-z])/u;
+// Words that may surround the region in a night question: "що було за ніч у києві".
+const NIGHT_FILLER_RE = /(?<![а-яґєіїa-z])(?:що|було|там|як|пройшла|минула|сьогодні|ця|цієї|в|у|на|по)(?![а-яґєіїa-z])/gu;
 
 // Bot-directed request words that may lead a bare-region message: "карта київ",
 // "покажи львів". Kept to clearly imperative words so ordinary sentences that
@@ -35,7 +41,7 @@ const nonCountry = (region) => (region && region.kind !== 'country' ? region : n
 /**
  * @param {string} rawText
  * @returns {{
- *   kind: 'region-why'|'channel-why'|'region-map'|'national-map'|null,
+ *   kind: 'region-why'|'channel-why'|'region-map'|'national-map'|'region-night'|null,
  *   region: object|null,
  *   cooldownKey: string|null,
  * }}
@@ -49,6 +55,15 @@ export function routeMessage(rawText) {
   if (text.startsWith('/')) return none;
 
   const why = WHY_RE.test(text);
+
+  // 0) A night question about a region: "що за ніч у києві", "ніч харків",
+  //    "київ вночі". Strict, like the bare-region form — the leftover after
+  //    removing the night words and fillers must be exactly a region.
+  if (NIGHT_RE.test(text) && !why) {
+    const leftover = text.replace(NIGHT_RE, ' ').replace(NIGHT_FILLER_RE, ' ').replace(REQUEST_PREFIX_RE, '').replace(/[?!.,]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const strict = nonCountry(resolveRegionStrict(leftover));
+    if (strict) return { kind: 'region-night', region: strict, cooldownKey: `night:${strict.cacheKey}` };
+  }
 
   // 1) Explicit "тривога [в] X" / "чому тривога в X" — needs the word тривога.
   const query = parseRegionQuery(text);

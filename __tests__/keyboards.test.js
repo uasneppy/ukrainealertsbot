@@ -101,3 +101,14 @@ describe('settingsKeyboard', () => {
     }
   });
 });
+
+describe('night button', () => {
+  it('is offered under a region map only when asked for', async () => {
+    const { mapKeyboard, CALLBACK_NIGHT } = await import('../neptun/keyboards.js');
+    const withNight = mapKeyboard({ cacheKey: 'c:київ', subscribed: false, night: true });
+    expect(withNight.inline_keyboard).toHaveLength(2);
+    expect(withNight.inline_keyboard[1][0]).toMatchObject({ text: '🌙 Що було за ніч', callback_data: `${CALLBACK_NIGHT}|c:київ` });
+    expect(mapKeyboard({ cacheKey: 'c:київ' }).inline_keyboard).toHaveLength(1);
+    expect(mapKeyboard({ night: true }).inline_keyboard).toHaveLength(1); // national map: no region
+  });
+});

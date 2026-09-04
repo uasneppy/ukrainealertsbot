@@ -132,3 +132,37 @@ export async function analyzeRegionQuery({ userQuery, regionName, regionReport, 
   const prompt = buildRegionPrompt({ userQuery, regionName, regionReport, channelMessages });
   return generate(apiKey, prompt);
 }
+
+/**
+ * Builds the prompt for the night digest. `factsText` is describeNightFacts()
+ * from neptun/nightDigest.js: NEPTUN tallies first, then the channel posts.
+ * The rules are the whole point — the posts are terse, slangy and sometimes
+ * contradictory, and the model must summarise them, not improve on them.
+ */
+export function buildNightPrompt({ regionName, factsText }) {
+  return `Ти — асистент з моніторингу повітряних загроз в Україні. Склади короткий підсумок ночі для регіону «${regionName}» для Telegram-чату.
+
+Вхідні дані (лише вони; нічого поза ними не існує):
+
+${factsText}
+
+Правила:
+- Спирайся ТІЛЬКИ на наведені дані. Не вигадуй цілей, кількостей, часу чи напрямків. Якщо чогось у даних немає — пропусти або напиши «невідомо».
+- Кількості з NEPTUN — це треки, не підтверджені цілі; кількості з каналів — «за повідомленнями». Так і пиши.
+- Повідомлення каналів — це заяви, часто уривчасті («наче мінус», «курс північ»). Узагальнюй їх, не переказуй дослівно; якщо вони суперечать одне одному — скажи, що дані розходяться.
+- Час — київський, у форматі ГГ:ХХ.
+- Без markdown (жодних зірочок чи підкреслень), звичайний текст, emoji та • дозволені. До 120 слів.
+
+Формат:
+🌙 ${regionName} — за ніч
+• Що летіло: [типи та кількості над регіоном / поблизу, з приблизним часом]
+• Пуски та події: [пуски БпЛА з кількістю, зліт авіації, балістика, «Калібри» — з часом]
+• Зараз: [одним реченням, що каже останнє повідомлення або NEPTUN]`;
+}
+
+/** Night digest from Gemini; throws without a key or on API failure. */
+export async function analyzeNightDigest({ regionName, factsText }) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY is required');
+  return generate(apiKey, buildNightPrompt({ regionName, factsText }));
+}
