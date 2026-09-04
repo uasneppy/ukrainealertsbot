@@ -18,6 +18,7 @@ import {
   THREAT_EMOJI,
   THREAT_NAMES_UA,
   computeAlertKeySets,
+  threatDisplayName,
 } from './threatMeta.js';
 import { buildRegionStatus, buildFocusCaption } from './regionContext.js';
 
@@ -747,7 +748,9 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
       const type = String(t?.type ?? 'unknown').toLowerCase();
       const entry = { lat: t?.lat, lon: t?.lon, type };
       if (focus) {
-        const label = `${THREAT_NAMES_UA[type] ?? (t?.title || '')}${t?.locality ? ' · ' + t.locality : ''}`.trim();
+        // "Загроза балістики · Київ" for an advisory, not "Балістика · Київ" —
+        // the label is read as "what is over my city".
+        const label = `${threatDisplayName(t)}${t?.locality ? ' · ' + t.locality : ''}`.trim();
         if (label) entry.label = escapeHtml(label);
         if (Number.isFinite(t?.heading)) entry.heading = t.heading;
         const trail = (Array.isArray(t?.trail) ? t.trail : [])

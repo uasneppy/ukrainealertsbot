@@ -25,6 +25,7 @@ const ago = (timestamp, now) => {
  * @param {object}  facts.renderQueue   from renderQueueStats()
  * @param {number}  facts.subscriptions subscriptions for the asking chat
  * @param {number}  facts.watchedRegions distinct regions the watcher polls
+ * @param {object|null} [facts.eventFeed] from eventWatcher.stats(); null when disabled
  * @param {number}  [facts.now]
  */
 export function formatStatusReport(facts = {}) {
@@ -71,6 +72,21 @@ export function formatStatusReport(facts = {}) {
       ? `🗺 Кеш меж: оновлено ${ago(now - facts.geoAgeMs, now)}`
       : '🔴 Кеш меж: файли відсутні'
   );
+  // The event feed fails the same silent way as everything else: a dead
+  // endpoint just means no take-offs are ever announced.
+  if (facts.eventFeed === null) {
+    lines.push('⚪ Стрічка подій: вимкнено (EVENT_CHANNELS=none)');
+  } else if (facts.eventFeed) {
+    const feed = facts.eventFeed;
+    if (!feed.lastPollAt) {
+      lines.push('⚪ Стрічка подій: ще не опитувалась');
+    } else if (feed.lastError && feed.lastPollAt > feed.lastOkAt) {
+      lines.push(`🔴 Стрічка подій: помилка — ${feed.lastError}`);
+    } else {
+      const last = feed.lastEventAt ? `, остання подія ${ago(feed.lastEventAt, now)}` : '';
+      lines.push(`🟢 Стрічка подій: опитано ${ago(feed.lastOkAt, now)}, подій: ${feed.announced ?? 0}${last}`);
+    }
+  }
   lines.push(`🔔 Підписки цього чату: ${facts.subscriptions ?? 0}`);
   lines.push(`👀 Регіонів під наглядом: ${facts.watchedRegions ?? 0}`);
 

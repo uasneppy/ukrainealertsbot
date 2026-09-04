@@ -9,11 +9,19 @@ import { fetchLatestChannelMessages, formatChannelMessages } from './channelMess
 import { analyzeAlertMessages, analyzeRegionQuery, getAiHealth } from './geminiAnalysis.js';
 import { resolveRegion, regionFromCacheKey } from './neptun/regionResolver.js';
 import { routeMessage } from './neptun/messageRouter.js';
-import { mapKeyboard, decodeCallback, CALLBACK_REFRESH, CALLBACK_SUBSCRIBE, CALLBACK_UNSUBSCRIBE } from './neptun/keyboards.js';
+import {
+  mapKeyboard,
+  settingsKeyboard,
+  decodeCallback,
+  CALLBACK_REFRESH,
+  CALLBACK_SUBSCRIBE,
+  CALLBACK_UNSUBSCRIBE,
+  CALLBACK_TOGGLE,
+} from './neptun/keyboards.js';
 import { buildRegionStatus, formatRegionReport } from './neptun/regionContext.js';
 import { getOrLaunchBrowser, closeBrowser } from './neptun/browser.js';
 import { renderNeptunMap, buildNationalReport, renderQueueStats } from './neptun/mapRenderer.js';
-import { fetchSnapshot } from './neptun/neptunApi.js';
+import { fetchSnapshot, fetchChannelMessages } from './neptun/neptunApi.js';
 import { startStream, stopStream, getState, hasSnapshot, streamAgeMs, onUpdate as onStreamUpdate } from './neptun/neptunStream.js';
 import { getGeoData, geoCacheAgeMs } from './neptun/fetchGeo.js';
 import {
@@ -23,11 +31,29 @@ import {
   unsubscribe,
   listSubscriptions,
   subscribedRegions,
+  subscribedChats,
   getSubscriptionsFile,
   MAX_PER_CHAT,
 } from './neptun/subscriptions.js';
 import { formatStatusReport } from './neptun/statusReport.js';
-import { createAlertWatcher, formatAlertNotification, formatThreatNotification } from './neptun/alertWatcher.js';
+import {
+  createAlertWatcher,
+  formatAlertNotification,
+  formatThreatNotification,
+  formatAdvisoryNotification,
+} from './neptun/alertWatcher.js';
+import { createEventWatcher } from './neptun/eventWatcher.js';
+import { formatEventNotification } from './neptun/eventDetector.js';
+import {
+  NOTIFY_CATEGORIES,
+  loadChatSettings,
+  getChatSettings,
+  toggleChatSetting,
+  flushChatSettings,
+  formatSettingsMessage,
+} from './neptun/chatSettings.js';
+import { createAdminGate, isGroupChat } from './neptun/adminGate.js';
+import { createChatNotifier } from './neptun/chatNotifier.js';
 import {
   loadAlertState,
   recordAlertState,
@@ -314,7 +340,7 @@ export function clearCooldown(key) {
 
 export function formatSubscribeReply(result, query) {
   if (result.ok) {
-    return `✅ Підписано на сповіщення: ${result.region.name}\nНадсилатиму тривогу та відбій.`;
+    return `✅ Підписано на сповіщення: ${result.region.name}\nНадсилатиму тривогу та відбій, цілі поблизу та загальнодержавні загрози (балістика, МіГ-31К, авіація, «Калібри», пуски БпЛА).\nЩо саме надсилати: /settings`;
   }
   switch (result.reason) {
     case 'duplicate':
@@ -331,7 +357,33 @@ export function formatSubscriptionList(subs) {
     return 'Підписок немає.\nДодати: /subscribe <регіон>, напр. /subscribe київщина';
   }
   const lines = subs.map((sub) => `• ${sub.name}`);
-  return `🔔 Активні підписки (${subs.length}):\n${lines.join('\n')}\n\nВідписатися: /unsubscribe <регіон> або /unsubscribe all`;
+  return `🔔 Активні підписки (${subs.length}):\n${lines.join('\n')}\n\nВідписатися: /unsubscribe <регіон> або /unsubscribe all\nЩо надсилати: /settings`;
+}
+
+/**
+ * Which settings category a regional advisory belongs to, and the dedupe key
+ * that lets the nationwide version of the same warning silence it. Ballistic
+ * risk is the one that arrives both ways (a NEPTUN marker over the city and
+ * the Air Force's own message); the rest only ever come from the map.
+ */
+export function advisoryRoute(threatType, regionCacheKey) {
+  const type = String(threatType ?? '').toLowerCase();
+  if (type === 'ballistic') {
+    return { category: 'ballistic', key: `ballistic_threat|${regionCacheKey}` };
+  }
+  return { category: 'targets', key: `${type}_advisory|${regionCacheKey}` };
+}
+
+/**
+ * Parses a comma list env var for channels/types. Unset or empty → default
+ * (docker compose passes "" for an unset variable, which must not disable
+ * anything); "none"/"off" → disabled (empty list); otherwise the list.
+ */
+export function parseListEnv(raw, fallback) {
+  const value = String(raw ?? '').trim();
+  if (!value) return fallback;
+  if (/^(none|off)$/i.test(value)) return [];
+  return value.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 }
 
 // ── Bot ───────────────────────────────────────────────────────────────────────
@@ -369,13 +421,7 @@ if (token && !isTestEnv) {
   // important: `docker compose` sets `${LIVE_ALERT_TYPES:-}` to "" when unset,
   // and that must not silently disable the feature). Explicit "none"/"off"
   // disables it; a comma list overrides the type set.
-  const rawTypes = (process.env.LIVE_ALERT_TYPES ?? '').trim();
-  let liveAlertTypes; // undefined → keep the watcher's default set
-  if (rawTypes) {
-    liveAlertTypes = /^(none|off)$/i.test(rawTypes)
-      ? []
-      : rawTypes.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  }
+  const liveAlertTypes = parseListEnv(process.env.LIVE_ALERT_TYPES, undefined);
   // `Number(x) || undefined` would turn an explicit 0 into "unset" — and 0 is a
   // meaningful value for these knobs (CONFIRM_OFF_MS=0 = announce відбій at
   // once). Empty/absent/garbage → undefined → the watcher's default.
@@ -390,6 +436,47 @@ if (token && !isTestEnv) {
   // How long an all-clear must hold before it's announced (flap guard). Lower =
   // faster "відбій", at the cost of a bigger chance of a premature one.
   const confirmOffMs = numEnv('CONFIRM_OFF_MS');
+  // How long a regional advisory (ballistic risk over Kyiv) stays silent after
+  // it was announced once, however many times the feed re-issues it.
+  const advisoryQuietMs = numEnv('ADVISORY_QUIET_MS');
+
+  // Every unprompted message passes through here: the chat's category settings
+  // decide whether it wants this kind of warning, and a per-chat window keeps
+  // the same warning from arriving twice by two routes.
+  const chatNotifier = createChatNotifier({
+    sendTo: (chatId, text) => notificationSender.sendTo(chatId, text),
+    getSettings: getChatSettings,
+  });
+
+  const notifyRegionEvent = (event) => {
+    if (event.kind === 'alert') {
+      chatNotifier.deliver({ category: 'alert', text: formatAlertNotification(event), chatIds: event.chatIds });
+      return;
+    }
+    if (event.kind === 'threat') {
+      chatNotifier.deliver({ category: 'targets', text: formatThreatNotification(event), chatIds: event.chatIds });
+      return;
+    }
+    if (event.kind === 'advisory') {
+      // Usually one advisory; if several types land at once, one message per
+      // category so a muted category never drags another along with it.
+      const buckets = new Map();
+      for (const item of event.events) {
+        const route = advisoryRoute(item.threat.type, event.region.cacheKey);
+        const bucket = buckets.get(route.key) ?? { ...route, events: [] };
+        bucket.events.push(item);
+        buckets.set(route.key, bucket);
+      }
+      for (const { category, key, events } of buckets.values()) {
+        chatNotifier.deliver({
+          category,
+          key,
+          text: formatAdvisoryNotification({ region: event.region, events }),
+          chatIds: event.chatIds,
+        });
+      }
+    }
+  };
 
   const alertWatcher = createAlertWatcher({
     initialStates: persistedAlertState,
@@ -403,14 +490,40 @@ if (token && !isTestEnv) {
     getGeo: getGeoData,
     ...(liveAlertTypes ? { liveAlertTypes } : {}),
     ...(liveAlertKm !== undefined ? { liveAlertKm } : {}),
+    ...(advisoryQuietMs !== undefined ? { advisoryQuietMs } : {}),
     // Enqueue and return: the tick must not sit waiting on a fan-out that is
     // paced over seconds, or ticks would overlap during a nationwide alert.
-    notify: (event) => {
-      const text = event.kind === 'threat'
-        ? formatThreatNotification(event)
-        : formatAlertNotification(event);
-      for (const chatId of event.chatIds) notificationSender.sendTo(chatId, text);
-    },
+    notify: notifyRegionEvent,
+  });
+
+  // ── Nationwide events (strategic aviation, MiG-31K, Kalibr, drone launches) ──
+  // Read from the channel feed NEPTUN aggregates and from the threat map's
+  // MiG-31K marker; announced once per kind to every chat with a subscription
+  // that hasn't muted the category. EVENT_CHANNELS=none disables it.
+  const eventChannels = parseListEnv(process.env.EVENT_CHANNELS, undefined);
+  const eventWatcher = eventChannels && eventChannels.length === 0
+    ? null
+    : createEventWatcher({
+        fetchMessages: fetchChannelMessages,
+        getSnapshot: () => watcherSnapshot.get(),
+        hasAudience: () => subscribedChats().length > 0,
+        ...(eventChannels ? { channels: eventChannels } : {}),
+        ...(numEnv('EVENT_POLL_MS') !== undefined ? { intervalMs: numEnv('EVENT_POLL_MS') } : {}),
+        ...(numEnv('EVENT_COOLDOWN_MS') !== undefined ? { cooldownMs: numEnv('EVENT_COOLDOWN_MS') } : {}),
+        ...(numEnv('EVENT_UAV_COOLDOWN_MS') !== undefined ? { uavCooldownMs: numEnv('EVENT_UAV_COOLDOWN_MS') } : {}),
+        notify: (event) => {
+          chatNotifier.deliver({
+            category: event.category,
+            key: event.kind,
+            text: formatEventNotification(event),
+            chatIds: subscribedChats(),
+          });
+        },
+      });
+
+  // Settings changes in a group are an admin's call — see neptun/adminGate.js.
+  const adminGate = createAdminGate({
+    getChatMember: (chatId, userId) => bot.getChatMember(chatId, userId),
   });
 
   (async () => {
@@ -421,6 +534,7 @@ if (token && !isTestEnv) {
         getGeoData(),
         loadSubscriptions(),
         loadAlertState(),
+        loadChatSettings(),
       ]);
       // Object.assign so the watcher's captured reference sees it — the
       // watcher is constructed before this async pre-warm finishes.
@@ -429,6 +543,12 @@ if (token && !isTestEnv) {
       // Near-real-time: react the moment the stream reports a changed threat or
       // alert, instead of only on the periodic poll. wake() coalesces bursts.
       onStreamUpdate(() => alertWatcher.wake());
+      if (eventWatcher) {
+        eventWatcher.start();
+        // Seed now rather than one poll interval from now, so the first real
+        // event after boot is caught that much sooner.
+        eventWatcher.tick().catch((err) => console.error('[startup] Event seed failed:', err?.message ?? err));
+      }
       getLiveNeptunMap().catch((err) =>
         console.error('[startup] Map warm-up failed:', err?.message ?? err)
       );
@@ -632,10 +752,30 @@ if (token && !isTestEnv) {
         renderQueue: renderQueueStats(),
         subscriptions: listSubscriptions(chatId).length,
         watchedRegions: subscribedRegions().length,
+        eventFeed: eventWatcher ? eventWatcher.stats() : null,
       }));
     } catch (error) {
       console.error('Failed to send status:', error);
       await bot.sendMessage(chatId, 'Не вдалося зібрати стан.');
+    }
+  });
+
+  // ── /settings — which notification categories this chat wants ─────────────
+  bot.onText(/^\/settings(?:@\S+)?$/, async (msg) => {
+    const chatId = msg.chat.id;
+    try {
+      const { allowed } = await adminGate.canManage({ chat: msg.chat, from: msg.from, senderChat: msg.sender_chat });
+      if (!allowed) {
+        await bot.sendMessage(chatId, '⚙️ Налаштування сповіщень у групі можуть змінювати лише адміністратори.');
+        return;
+      }
+      const settings = getChatSettings(chatId);
+      await bot.sendMessage(chatId, formatSettingsMessage(settings, { isGroup: isGroupChat(msg.chat) }), {
+        reply_markup: settingsKeyboard(settings, NOTIFY_CATEGORIES),
+      });
+    } catch (error) {
+      console.error('Failed to send settings:', error);
+      await bot.sendMessage(chatId, 'Не вдалося показати налаштування.');
     }
   });
 
@@ -660,6 +800,34 @@ if (token && !isTestEnv) {
 
     if (!chatId || !action) {
       await ack();
+      return;
+    }
+
+    if (action === CALLBACK_TOGGLE) {
+      try {
+        const chat = query.message.chat;
+        const { allowed } = await adminGate.canManage({ chat, from: query.from });
+        if (!allowed) {
+          await ack('Лише адміністратори групи можуть змінювати налаштування');
+          return;
+        }
+        const settings = toggleChatSetting(chatId, cacheKey);
+        if (!settings) {
+          await ack('Невідомий параметр');
+          return;
+        }
+        await ack(`${settings[cacheKey] ? '✅ Увімкнено' : '🔕 Вимкнено'}`);
+        await bot
+          .editMessageText(formatSettingsMessage(settings, { isGroup: isGroupChat(chat) }), {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: settingsKeyboard(settings, NOTIFY_CATEGORIES),
+          })
+          .catch(() => {});
+      } catch (error) {
+        console.error('Settings toggle failed:', error?.message ?? error);
+        await ack('Не вдалося змінити налаштування');
+      }
       return;
     }
 
@@ -768,12 +936,13 @@ if (token && !isTestEnv) {
     }
 
     alertWatcher.stop();
+    eventWatcher?.stop();
     stopStream();
     // Deliver whatever is still queued — an alert notification abandoned
     // mid-fan-out is one nobody will ever be told about.
     await notificationSender.drain();
     // Let any queued subscription/state write land before the process goes away.
-    await Promise.all([flushSubscriptions(), flushAlertState()]);
+    await Promise.all([flushSubscriptions(), flushAlertState(), flushChatSettings()]);
     await closeBrowser();
     console.log('[shutdown] Done');
     process.exit(0);

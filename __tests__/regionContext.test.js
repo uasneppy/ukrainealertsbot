@@ -230,3 +230,30 @@ describe('report and caption builders', () => {
     expect(caption).toContain('© neptun.in.ua');
   });
 });
+
+describe('advisories and destinations in reports', () => {
+  const kyiv = {
+    kind: 'city', name: 'Київ', lat: 50.4501, lon: 30.5234,
+    radiusKm: 65, alertKey: 'м. київ', oblastGeoKey: 'м. київ', raionKey: null,
+  };
+
+  it('names a ballistic advisory as a warning, with no course', () => {
+    const threats = [{
+      id: 'adv', type: 'ballistic', title: 'Балістична загроза', lat: 50.45, lon: 30.52, heading: 270,
+      explanationShort: 'Висока ймовірність балістичного удару.',
+    }];
+    const status = buildRegionStatus({ region: kyiv, threats, alerts: {}, geo: {} });
+    expect(status.threatsIn[0]).toMatchObject({ nature: 'advisory', name: 'Загроза балістики' });
+    const report = formatRegionReport(status);
+    expect(report).toContain('💥 Загроза балістики');
+    expect(report).not.toContain('Балістика ·');
+    expect(report).not.toContain('курс захід');
+  });
+
+  it('phrases a destination-flagged target as heading to the locality', () => {
+    const threats = [{ id: 'd', type: 'uav', title: 'БпЛА', lat: 50.4353, lon: 30.8482, locality: 'Обухів', heading: 204, destination: true, positionQuality: 'approx' }];
+    const status = buildRegionStatus({ region: kyiv, threats, alerts: {}, geo: {} });
+    expect(status.threatsIn[0]).toMatchObject({ destination: true, approx: true });
+    expect(formatRegionReport(status)).toContain('БпЛА · курсом на Обухів');
+  });
+});

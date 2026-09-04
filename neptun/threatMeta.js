@@ -86,3 +86,58 @@ export function computeAlertKeySets(alerts = {}) {
   }));
   return { oblastKeys, raionKeys };
 }
+
+// ── Advisory vs tracked object ────────────────────────────────────────────────
+// NEPTUN reuses the threat types for two different things. A `ballistic` entry
+// titled «Балістична загроза» (or a `mig31k` entry with `advisory: true`) is a
+// warning that something *may* be used — "channels report a ballistic risk for
+// the night" — while a «Крилата ракета» with a trail is an object being
+// tracked. Read as a tracked object, an advisory becomes "балістика
+// наближається, ~40 км" for a missile nobody has launched: the exact false alarm
+// the operator reported. So the distinction is made once, here, and every
+// caption and notification phrases the two differently.
+
+const ADVISORY_TITLE_RE = /загроз|ризик|попередж|ймовірн/iu;
+const ADVISORY_EXPLANATION_RE = /загроз|ймовірн|можлив|очіку/iu;
+const TRACKED_EXPLANATION_RE = /пуск|зафіксовано|курсом|підтверджень/iu;
+
+/**
+ * @returns {'advisory'|'tracked'}
+ */
+export function threatNature(threat) {
+  if (!threat || typeof threat !== 'object') return 'tracked';
+  if (threat.advisory === true) return 'advisory';
+  if (threat.advisory === false) return 'tracked';
+  const type = String(threat.type ?? '').toLowerCase();
+  // A MiG-31K on the map is never "over" anyone in Ukraine — the aircraft is
+  // the carrier; the marker means "it took off, Kinzhal risk countrywide".
+  if (type === 'mig31k') return 'advisory';
+  if (ADVISORY_TITLE_RE.test(String(threat.title ?? ''))) return 'advisory';
+  const explanation = String(threat.explanationShort ?? '');
+  if (ADVISORY_EXPLANATION_RE.test(explanation) && !TRACKED_EXPLANATION_RE.test(explanation)) {
+    return 'advisory';
+  }
+  return 'tracked';
+}
+
+/** Ukrainian label for an advisory of a given type — "Загроза балістики", not "Балістика". */
+export const ADVISORY_LABELS_UA = {
+  ballistic: 'Загроза балістики',
+  missile:   'Загроза ракетного удару',
+  kab:       'Загроза КАБ',
+  mig31k:    'Зліт МіГ-31К',
+  uav:       'Загроза БпЛА',
+  fpv:       'Загроза FPV-дронів',
+};
+
+export function advisoryLabel(type) {
+  const key = String(type ?? '').toLowerCase();
+  return ADVISORY_LABELS_UA[key] ?? `Загроза: ${THREAT_NAMES_UA[key] ?? key}`;
+}
+
+/** Display name that already says whether this is a warning or a tracked object. */
+export function threatDisplayName(threat) {
+  const type = String(threat?.type ?? 'unknown').toLowerCase();
+  if (threatNature(threat) === 'advisory') return advisoryLabel(type);
+  return THREAT_NAMES_UA[type] ?? (threat?.title || type);
+}

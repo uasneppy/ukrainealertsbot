@@ -12,6 +12,8 @@
 export const CALLBACK_REFRESH = 'r';
 export const CALLBACK_SUBSCRIBE = 's';
 export const CALLBACK_UNSUBSCRIBE = 'u';
+/** Toggle one notification category; the payload after '|' is its key. */
+export const CALLBACK_TOGGLE = 't';
 
 const MAX_CALLBACK_BYTES = 64;
 
@@ -48,4 +50,22 @@ export function mapKeyboard({ cacheKey = null, subscribed = false } = {}) {
   }
 
   return row.length ? { inline_keyboard: [row] } : undefined;
+}
+
+/**
+ * One toggle button per notification category, state shown in the label so
+ * the keyboard is the settings screen — the message text under it only
+ * explains what each category means.
+ *
+ * @param {Record<string, boolean>} settings   from getChatSettings()
+ * @param {Array<{ key, emoji, label }>} categories  NOTIFY_CATEGORIES
+ */
+export function settingsKeyboard(settings, categories) {
+  const rows = [];
+  for (const { key, emoji, label } of categories) {
+    const data = encodeCallback(CALLBACK_TOGGLE, key);
+    if (!data) continue;
+    rows.push([{ text: `${settings[key] ? '✅' : '🔕'} ${emoji} ${label}`, callback_data: data }]);
+  }
+  return rows.length ? { inline_keyboard: rows } : undefined;
 }
