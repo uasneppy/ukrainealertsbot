@@ -11,13 +11,24 @@ import os from 'os';
 import { createNightLog, nightWindow } from '../neptun/nightLog.js';
 
 let dir;
-beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'night-log-')); });
-afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+let logs;
+beforeEach(async () => {
+  dir = await fs.mkdtemp(path.join(os.tmpdir(), 'night-log-'));
+  logs = [];
+});
+// Every log persists on a (zero) debounce; a write landing while the temp
+// directory is being removed made CI fail with ENOTEMPTY. Flush them first —
+// the same rule the subscriptions tests follow.
+afterEach(async () => {
+  await Promise.all(logs.map((l) => l.flush()));
+  await fs.rm(dir, { recursive: true, force: true });
+});
 
 const T0 = Date.parse('2026-09-04T20:00:00Z');
 const make = (over = {}) => {
   let clock = T0;
   const log = createNightLog({ file: path.join(dir, 'nightLog.json'), persistDebounceMs: 0, now: () => clock, log: { log() {}, error() {} }, ...over });
+  logs.push(log);
   return { log, advance: (ms) => { clock += ms; } };
 };
 const uav = (id, lat, lon, extra = {}) => ({ id, type: 'uav', title: 'БпЛА', lat, lon, ...extra });
