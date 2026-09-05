@@ -41,3 +41,16 @@ describe('relevantRegionKeys / messageConcerns', () => {
     expect(messageConcerns({}, kyiv)).toBe(false);
   });
 });
+
+describe('mentionedRegions — hostile input', () => {
+  // A post with stylised Unicode letters (two code units each) once looped
+  // forever: the scanner stepped one unit into the pair, the /u regex snapped
+  // back, and the bot sat at 100% CPU with its heartbeat frozen for hours.
+  it('terminates on astral-plane letters and still finds regions around them', () => {
+    const start = Date.now();
+    expect([...mentionedRegions('𝐊𝐢𝐢𝐯 test 𝗕𝗽𝗟𝗔 над Києвом 🇺🇦 𝓞𝓭𝓮𝓼𝓪')]).toEqual(['c:київ']);
+    expect(mentionedRegions('𝐀'.repeat(200)).size).toBe(0);
+    expect(mentionedRegions('😀'.repeat(50) + ' Харків').has('c:харків')).toBe(true);
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+});

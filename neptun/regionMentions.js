@@ -23,10 +23,19 @@ export function mentionedRegions(text) {
     .replace(/[^\p{L}\p{N}'\s-]/gu, ' ');
   const keys = new Set();
   let m;
+  let from = 0;
+  WORD_START_RE.lastIndex = 0;
   while ((m = WORD_START_RE.exec(norm)) !== null) {
     const region = resolveRegion(norm.slice(m.index));
     if (region && region.kind !== 'country') keys.add(region.cacheKey);
-    WORD_START_RE.lastIndex = m.index + 1;
+    // Advance by a whole code point. Stylised letters channels love (𝐁𝐩𝐋𝐀)
+    // are two code units; stepping one unit lands inside the pair, the /u
+    // regex snaps back to its start, and the loop never ends — which pinned
+    // the bot at 100% CPU for hours with its heartbeat frozen.
+    const cp = norm.codePointAt(m.index);
+    from = m.index + (cp > 0xffff ? 2 : 1);
+    if (from <= WORD_START_RE.lastIndex && m[0].length === 0 && from <= m.index) break;
+    WORD_START_RE.lastIndex = from;
   }
   WORD_START_RE.lastIndex = 0;
   return keys;
