@@ -26,6 +26,10 @@ scripts
 .upm
 .breakpoints
 
+# Claude Code — local agent worktrees (each with its own node_modules) and
+# settings, not app code
+.claude
+
 # Docs
 *.md
 
