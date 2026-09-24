@@ -21,12 +21,24 @@
 /** How stale stream state may be before it stops being an acceptable fallback. */
 export const DEFAULT_STREAM_FALLBACK_MS = 60_000;
 
+/**
+ * How old a REST snapshot may be, by NEPTUN's own `serverTime`, and still be
+ * served as "now". Normal is a few seconds: the CDN in front of the API caches
+ * for 5 s and may revalidate in the background for 25 more. Far past that the
+ * CDN is serving a stale copy while the origin is down — the "live" map would
+ * then be a picture of the past. Generous enough that clock skew between us
+ * and NEPTUN never trips it.
+ */
+export const DEFAULT_REST_STALE_MS = 90_000;
+
 export function createSnapshotSource({
   fetchSnapshot,
   getState,
   hasSnapshot,
   streamAgeMs,
   fallbackMs = DEFAULT_STREAM_FALLBACK_MS,
+  restStaleMs = DEFAULT_REST_STALE_MS,
+  now = () => Date.now(),
   log = console,
 } = {}) {
   if (typeof fetchSnapshot !== 'function') throw new Error('fetchSnapshot is required');
@@ -49,6 +61,23 @@ export function createSnapshotSource({
   }
 
   /**
+   * The CDN caches /threats and /alerts separately, so the REST alerts can lag
+   * what the socket has already delivered — and an alert that just ended would
+   * come back for one read, long enough for the watcher to announce it again.
+   * Alert state carries a version (the time it last changed); the higher one is
+   * newer whichever path brought it. Without versions on both sides REST stays
+   * the authority, as before.
+   */
+  function newerAlerts(rest) {
+    if (!hasSnapshot()) return rest;
+    const stream = getState()?.alerts;
+    if (Number.isFinite(stream?.version) && Number.isFinite(rest?.version) && stream.version > rest.version) {
+      return stream;
+    }
+    return rest;
+  }
+
+  /**
    * @returns {Promise<{threats: Array, alerts: object, source: 'api'|'stream'}>}
    * @throws when the API fails and no usable stream state exists — the caller
    *         must say "не вдалося" rather than show something outdated.
@@ -56,9 +85,14 @@ export function createSnapshotSource({
   async function get() {
     try {
       const snapshot = await fetchOnce();
+      const builtAt = Date.parse(snapshot?.serverTime ?? '');
+      if (Number.isFinite(builtAt) && now() - builtAt > restStaleMs) {
+        // Answered, but from the past: handled exactly like an unreachable API.
+        throw new Error(`NEPTUN API snapshot is ${Math.round((now() - builtAt) / 1000)} s old`);
+      }
       return {
         threats: snapshot?.threats ?? [],
-        alerts: snapshot?.alerts ?? { oblasts: [], raions: [] },
+        alerts: newerAlerts(snapshot?.alerts ?? { oblasts: [], raions: [] }),
         source: 'api',
       };
     } catch (err) {

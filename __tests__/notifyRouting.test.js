@@ -4,7 +4,8 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { advisoryRoute, parseListEnv, formatSubscribeReply, formatSubscriptionList } from '../bot.js';
+import { advisoryRoute, parseListEnv, formatSubscribeReply, formatSubscriptionList, formatHelp, OFFICIAL_ALERTS_NOTE } from '../bot.js';
+import { stripHtml } from '../neptun/telegramFormat.js';
 
 describe('advisoryRoute', () => {
   it('routes a ballistic advisory to the ballistic category under the nationwide key', () => {
@@ -37,5 +38,26 @@ describe('subscription replies point at /settings', () => {
 
   it('in the subscription list', () => {
     expect(formatSubscriptionList([{ name: 'Київ' }])).toContain('/settings');
+  });
+});
+
+describe('not an official warning system', () => {
+  // NEPTUN's API terms (§5): a service about people's safety must say so and
+  // point at the official signal. /start is where a new user first looks.
+  it('says so in /start and /help', () => {
+    const text = stripHtml(formatHelp());
+    expect(text).toContain('не офіційна система оповіщення');
+    expect(text).toContain('офіційний сигнал повітряної тривоги');
+    expect(text).toContain('neptun.in.ua');
+    expect(text).toContain('/subscribe');
+  });
+
+  it('says so when someone subscribes — the moment they start relying on it', () => {
+    expect(stripHtml(formatSubscribeReply({ ok: true, region: { name: 'Київ' } }, 'київ'))).toContain(OFFICIAL_ALERTS_NOTE);
+  });
+
+  it('keeps the help text valid Telegram HTML', () => {
+    // "<регіон>" unescaped would make Telegram reject the whole message.
+    expect(formatHelp()).not.toMatch(/<регіон>/);
   });
 });

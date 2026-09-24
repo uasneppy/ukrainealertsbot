@@ -56,8 +56,8 @@ renderer — it needs no Telegram token and writes a PNG you can open.
 | `neptun/adminGate.js` | Who may change settings: anyone in private, admins only in groups (cached `getChatMember`) |
 | `neptun/messageRouter.js` | Pure: message text → which reply it asks for |
 | `neptun/keyboards.js` | Inline buttons and their 64-byte callback payloads |
-| `neptun/statusReport.js` | /status — makes the deliberately-silent degradations visible |
-| `neptun/threatIcons.js`, `defaultIcons.js`, `threatMeta.js` | Marker icons and per-type metadata; `threatNature` tells an advisory from a tracked object |
+| `neptun/statusReport.js` | /status — makes the deliberately-silent degradations visible (incl. the API's data age) |
+| `neptun/threatIcons.js`, `defaultIcons.js`, `threatMeta.js` | Marker icons and per-type metadata; `threatNature` tells an advisory from a tracked object; alert levels (`entryAlertLevel`), `isAreaOnly`, `groupSize` |
 | `neptun/telegramFormat.js` | HTML escaping/wrapping for every outbound message; `sanitizeAiHtml` for Gemini output |
 | `fetchWithTimeout.js` | Every outbound HTTP call goes through this |
 | `telegramSender.js` | Paced, retrying queue for unprompted fan-out (alert notifications) |
@@ -74,6 +74,9 @@ constraint that shaped it is why the next person doesn't reintroduce the bug.
 answer reads the REST API through `neptun/liveState.js` — the stream is the
 fallback for an unreachable API, never the default, because its freshness clock
 is reset by `heartbeat`/`pong` and a live-but-drifted socket looks healthy.
+A REST answer is a CDN copy too: one whose `serverTime` is over 90 s old counts
+as no answer, and alert state comes from whichever side has the higher
+`version`.
 Rendered frames are reused only while a fingerprint of the data is unchanged
 (`neptun/frameCache.js`), and the alert watcher skips a tick entirely rather
 than reason from state it can't trust. When in doubt, say nothing rather than
@@ -81,7 +84,18 @@ say something outdated.
 
 **Bias asymmetrically.** Alerts go out immediately; all-clears must be
 confirmed. The costs of the two mistakes are not symmetric, and the code should
-show that they were weighed.
+show that they were weighed. Alert levels (since Sept 2026: 🟡 yellow = drone
+threat, 🔴 red = missile / massive drone threat; NEPTUN's `level` + `reasons`)
+follow the same rule: yellow → red goes out at once, red → yellow is held like
+an all-clear, and an entry with no level counts as red — but the text never
+says "червоний рівень" unless the feed did (`entryAlertLevel().known`).
+
+**A centroid is not a place.** `areaOnly: true` means the sources named only an
+oblast, and lat/lon is its centroid. Such a track never gets a distance, a
+direction, a course, a trail or a marker: `buildRegionStatus` puts it in
+`threatsArea` (matched by oblast name), the map draws a dashed "по області"
+chip, the night log keeps the oblast instead of a sample. Read as a point it
+became "БпЛА у регіоні" for a city in another oblast.
 
 **A warning is not a missile.** NEPTUN uses the same threat types for a tracked
 object («Крилата ракета» with a trail) and for a risk («Балістична загроза»

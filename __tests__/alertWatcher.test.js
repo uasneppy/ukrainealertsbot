@@ -367,7 +367,8 @@ describe('state across restarts', () => {
     await watcher.tick();
 
     expect(notify).not.toHaveBeenCalled();
-    expect(onStateChange).toHaveBeenCalledWith(KYIV_OBLAST.cacheKey, true, expect.any(Number));
+    // An entry with no level counts as red — see entryAlertLevel.
+    expect(onStateChange).toHaveBeenCalledWith(KYIV_OBLAST.cacheKey, true, expect.any(Number), 'red');
   });
 
   it('records every confirmed transition so the next boot can reconcile', async () => {
@@ -390,7 +391,7 @@ describe('state across restarts', () => {
     clock += 1_000;
     await watcher.tick(); // alert announced
 
-    expect(onStateChange).toHaveBeenLastCalledWith(KYIV_OBLAST.cacheKey, true, expect.any(Number));
+    expect(onStateChange).toHaveBeenLastCalledWith(KYIV_OBLAST.cacheKey, true, expect.any(Number), 'red');
   });
 });
 

@@ -1,7 +1,8 @@
 /**
  * Watches subscribed regions and reports two kinds of unprompted notification:
  *
- *   • Alert transitions — тривога starting / відбій — per region.
+ *   • Alert transitions — тривога starting / відбій — per region, and a
+ *     running alert changing level (yellow ↔ red, see threatMeta.js).
  *   • Live threat events — a fast, dangerous target (missile, ballistic, KAB)
  *     appearing near a subscribed region or entering it. These are the
  *     "react now" notifications the operator asked for.
@@ -22,11 +23,15 @@
  *     sky when the bot came up.
  *  3. Confirmation is asymmetric for alerts: тривога goes out at once, відбій
  *     must hold for CONFIRM_OFF_MS first (a premature all-clear is the costly
- *     mistake).
+ *     mistake). Levels follow the same rule: yellow → red is announced at once,
+ *     red → yellow must hold like an all-clear — people leave the shelter on it.
  *  4. Threat events are event-based, not continuous. A target is announced when
  *     it appears (approaching) and again when it enters the region — never per
  *     tick as it drifts, which is the main source of spam. Only high-priority
  *     types qualify; drones/recon are covered by the region alert and the map.
+ *     An area-only target («Ракета на Одеську область») is announced to that
+ *     oblast as exactly that — no distance, no "над" — and again once it has a
+ *     real position.
  *  5. An advisory is said once. NEPTUN re-issues advisory tracks under new ids
  *     as sources repeat the warning; each would otherwise be "news" again.
  *     After one announcement the same kind of advisory for the same region is
@@ -35,8 +40,9 @@
  * Dependencies are injected so the whole thing is testable without a socket.
  */
 
-import { buildRegionStatus, fmtKyivTime } from './regionContext.js';
+import { buildRegionStatus, fmtKyivTime, formatDistance } from './regionContext.js';
 import { subscribedRegions } from './subscriptions.js';
+import { ALERT_LEVEL_EMOJI, ALERT_LEVEL_WORDS, maxAlertLevel } from './threatMeta.js';
 import { esc, b, i } from './telegramFormat.js';
 
 /** Alert start: announced as soon as it is observed. */
@@ -88,6 +94,19 @@ export const DEFAULT_LIVE_ALERT_KM = 120;
 /** Heading within this many degrees of the region counts as "approaching". */
 const APPROACH_CONE_DEG = 60;
 
+/** A region's alert state, weakest to strongest. */
+const LEVEL_RANK = { off: 0, yellow: 1, red: 2 };
+
+/** 'off' | 'yellow' | 'red' — what the region is under right now. */
+const regionLevel = (status) => (status.alertActive ? status.alertLevel ?? 'red' : 'off');
+
+/**
+ * Later stages of the same target are news, earlier ones are not: an
+ * area-only warning that gets a position ('area' → 'near'/'in') tells people
+ * where it is; the reverse tells them nothing new.
+ */
+const STAGE_RANK = { area: 1, near: 2, in: 3 };
+
 /** True when a nearby target is heading roughly toward the region. */
 function isApproaching(threat) {
   if (threat.inRegion) return true;
@@ -122,8 +141,11 @@ export function createAlertWatcher({
 
   const prioritySet = new Set(liveAlertTypes);
   /**
-   * cacheKey → { confirmed, candidate, candidateSince,
+   * cacheKey → { confirmedLevel, candidateLevel, candidateSince, peak,
    *              threats: Map<id, stage>, advisoryAt: Map<type, epoch ms> }
+   * Levels are 'off' | 'yellow' | 'red'; `peak` is the highest confirmed level
+   * of the alert now running (null when none), so its відбій can be routed to
+   * the chats that heard about it.
    */
   const states = new Map();
   let timer = null;
@@ -137,22 +159,23 @@ export function createAlertWatcher({
    * current set silently (first tick / restart) so nothing already in the sky
    * is re-announced.
    *
-   * @returns {Array<{ stage: 'near'|'in', threat: object }>}
+   * @returns {Array<{ stage: 'area'|'near'|'in', threat: object }>}
    */
   function trackThreats(tracked, status, seeding) {
-    // "in" wins over "near" for the same id; keep the strongest stage per id.
+    // Keep the strongest stage per id ("in" over "near" over "area").
     const byId = new Map();
     const consider = (threat, stage) => {
       // Advisories are handled by trackAdvisories: an approach cone and a
       // distance mean nothing for a warning about a place.
       if (!threat?.id || !prioritySet.has(threat.type) || threat.nature === 'advisory') return;
       const prev = byId.get(threat.id);
-      if (!prev || (prev.stage === 'near' && stage === 'in')) byId.set(threat.id, { threat, stage });
+      if (!prev || STAGE_RANK[stage] > STAGE_RANK[prev.stage]) byId.set(threat.id, { threat, stage });
     };
     for (const threat of status.threatsIn) consider(threat, 'in');
     for (const threat of status.threatsNear) {
       if (threat.distanceKm <= liveAlertKm && isApproaching(threat)) consider(threat, 'near');
     }
+    for (const threat of status.threatsArea ?? []) consider(threat, 'area');
 
     const events = [];
     const seen = new Set();
@@ -161,9 +184,9 @@ export function createAlertWatcher({
       const prevStage = tracked.get(id);
       tracked.set(id, stage);
       if (seeding) continue; // record silently the first time we see the region
-      if (!prevStage) events.push({ stage, threat });                       // appeared
-      else if (prevStage === 'near' && stage === 'in') events.push({ stage: 'in', threat }); // entered
-      // prev 'in' → nothing; 'near' → 'near' → nothing (no per-tick drift spam)
+      if (!prevStage) events.push({ stage, threat });                                  // appeared
+      else if (STAGE_RANK[stage] > STAGE_RANK[prevStage]) events.push({ stage, threat }); // located / entered
+      // same or weaker stage → nothing (no per-tick drift spam)
     }
     // A track that's gone (passed / lost) is dropped; a new id re-notifies.
     for (const id of [...tracked.keys()]) if (!seen.has(id)) tracked.delete(id);
@@ -226,49 +249,87 @@ export function createAlertWatcher({
         alerts: snapshot.alerts ?? {},
         geo,
       });
-      const active = status.alertActive;
+      const current = regionLevel(status);
 
       let state = states.get(region.cacheKey);
       const seeding = !state;
+      const record = (level) => onStateChange?.(region.cacheKey, level !== 'off', t, level === 'off' ? null : level);
+      const announce = (from, to, extra = {}) => {
+        announced.push({
+          kind: 'alert', region, chatIds, status,
+          active: to !== 'off',
+          level: to === 'off' ? null : to,
+          previousLevel: from === 'off' ? null : from,
+          // The alert's highest level, so a відбій reaches whoever heard the alert.
+          peakLevel: to === 'off' ? state.peak ?? from : state.peak,
+          ...extra,
+        });
+      };
 
-      // ── Alert transition (тривога / відбій) ──
+      // ── Alert transition (тривога / level change / відбій) ──
       if (seeding) {
         const remembered = initialStates ? initialStates[region.cacheKey] : null;
         const usable =
           remembered &&
           typeof remembered.confirmed === 'boolean' &&
           t - (remembered.at ?? 0) <= staleStateMs;
+        // null: an alert was on but its level wasn't recorded (state written
+        // before levels existed) — the one thing we can't compare against.
+        const rememberedLevel = !usable
+          ? undefined
+          : !remembered.confirmed
+            ? 'off'
+            : remembered.level === 'yellow' || remembered.level === 'red' ? remembered.level : null;
 
-        state = { confirmed: active, candidate: active, candidateSince: t, threats: new Map(), advisoryAt: new Map() };
+        state = {
+          confirmedLevel: current,
+          candidateLevel: current,
+          candidateSince: t,
+          peak: current === 'off' ? null : current,
+          threats: new Map(),
+          advisoryAt: new Map(),
+        };
         states.set(region.cacheKey, state);
 
-        if (usable && remembered.confirmed !== active) {
-          if (active) {
-            // Тривога began while we were down — a deploy during a raid. The
-            // one case where the first tick must speak, and speak at once.
-            onStateChange?.(region.cacheKey, active, t);
-            announced.push({ kind: 'alert', region, chatIds, active, status, missedWhileDown: true });
+        if (rememberedLevel === undefined) {
+          record(current);
+        } else if (rememberedLevel === null) {
+          if (current === 'off') {
+            // Held like any відбій below; unknown level counts as a full alert.
+            state.confirmedLevel = 'red';
+            state.peak = 'red';
           } else {
-            // Відбій while we were down. Even here it must survive the
-            // confirmOffMs hold: the first read after boot is exactly when a
-            // flapping feed or a half-warm stream is most likely, and a
-            // premature all-clear is the costly mistake. Seed the old
-            // confirmed state and let the normal hold logic announce it.
-            state.confirmed = true;
+            record(current);
           }
-        } else if (!usable) {
-          onStateChange?.(region.cacheKey, active, t);
+        } else if (LEVEL_RANK[current] > LEVEL_RANK[rememberedLevel]) {
+          // Тривога began, or went red, while we were down — a deploy during a
+          // raid. The one case where the first tick must speak, and at once.
+          record(current);
+          announce(rememberedLevel, current, { missedWhileDown: true });
+        } else if (LEVEL_RANK[current] < LEVEL_RANK[rememberedLevel]) {
+          // Відбій (or red → yellow) while we were down. Even here it must
+          // survive the confirmOffMs hold: the first read after boot is exactly
+          // when a flapping feed or a half-warm stream is most likely, and a
+          // premature all-clear is the costly mistake. Seed the old confirmed
+          // state and let the normal hold logic announce it.
+          state.confirmedLevel = rememberedLevel;
+          state.peak = maxAlertLevel(rememberedLevel, current === 'off' ? null : current);
         }
       } else {
-        if (active !== state.candidate) {
-          state.candidate = active;
+        if (current !== state.candidateLevel) {
+          state.candidateLevel = current;
           state.candidateSince = t;
         }
-        const requiredHoldMs = state.candidate ? confirmOnMs : confirmOffMs;
-        if (state.candidate !== state.confirmed && t - state.candidateSince >= requiredHoldMs) {
-          state.confirmed = state.candidate;
-          onStateChange?.(region.cacheKey, state.confirmed, t);
-          announced.push({ kind: 'alert', region, chatIds, active: state.confirmed, status });
+        const rising = LEVEL_RANK[state.candidateLevel] > LEVEL_RANK[state.confirmedLevel];
+        const requiredHoldMs = rising ? confirmOnMs : confirmOffMs;
+        if (state.candidateLevel !== state.confirmedLevel && t - state.candidateSince >= requiredHoldMs) {
+          const previous = state.confirmedLevel;
+          const next = state.candidateLevel;
+          state.confirmedLevel = next;
+          if (next !== 'off') state.peak = maxAlertLevel(previous === 'off' ? null : state.peak, next);
+          record(next);
+          announce(previous, next);
+          if (next === 'off') state.peak = null;
         }
       }
 
@@ -331,7 +392,12 @@ export function createAlertWatcher({
   return {
     tick,
     wake,
-    snapshotStates: () => new Map([...states].map(([k, v]) => [k, { ...v, threats: new Map(v.threats), advisoryAt: new Map(v.advisoryAt) }])),
+    snapshotStates: () => new Map([...states].map(([k, v]) => [k, {
+      ...v,
+      confirmed: v.confirmedLevel !== 'off',
+      threats: new Map(v.threats),
+      advisoryAt: new Map(v.advisoryAt),
+    }])),
     start() {
       if (timer) return;
       timer = setInterval(() => {
@@ -359,19 +425,49 @@ export function createAlertWatcher({
 // on a phone without the bullets colliding with the bold line above.
 const mapHint = (region) => `🗺 Мапа: /map ${esc(region.name)}`;
 
-/** Telegram-HTML text for an alert transition (тривога / відбій). */
-export function formatAlertNotification({ region, active, status }) {
+// The feed's reason for the alert ("Ракетна загроза (червоний рівень)"), or the
+// bare level when it named one without a reason; never a level it didn't state.
+const alertReasonText = (status) => {
+  const reasons = status?.alertReasons ?? [];
+  if (reasons.length) return reasons.join(' · ');
+  const words = status?.alertLevelKnown ? ALERT_LEVEL_WORDS[status.alertLevel] : '';
+  return words ? words[0].toUpperCase() + words.slice(1) : '';
+};
+
+const LEVEL_UP = { yellow: 1, red: 2 };
+
+/**
+ * Telegram-HTML text for an alert transition: тривога starting, a running
+ * alert changing level, відбій. A level change is its own message because it
+ * is its own instruction — red means everyone to the shelter, yellow means the
+ * alert goes on without that.
+ */
+export function formatAlertNotification({ region, active, level, previousLevel, status }) {
   if (!active) {
     return `🟢 ${b('Відбій тривоги')} — ${b(region.name)}`;
   }
 
-  const since = fmtKyivTime(status?.alertSince);
-  const lines = [`🔴 ${b('Повітряна тривога')} — ${b(region.name)}${since ? ` ${i(`з ${since}`)}` : ''}`];
+  const current = level ?? status?.alertLevel ?? 'red';
+  const emoji = ALERT_LEVEL_EMOJI[current] ?? ALERT_LEVEL_EMOJI.red;
+  const lines = [];
+  if (previousLevel && LEVEL_UP[current] > LEVEL_UP[previousLevel]) {
+    lines.push(`${emoji} ${b('Червоний рівень')} — ${b(region.name)}`);
+    lines.push('Тривогу посилено до червоного рівня.');
+  } else if (previousLevel && LEVEL_UP[current] < LEVEL_UP[previousLevel]) {
+    lines.push(`${emoji} ${b('Жовтий рівень')} — ${b(region.name)}`);
+    lines.push('Тривогу знижено до жовтого рівня — вона триває.');
+  } else {
+    const since = fmtKyivTime(status?.alertSince);
+    lines.push(`${emoji} ${b('Повітряна тривога')} — ${b(region.name)}${since ? ` ${i(`з ${since}`)}` : ''}`);
+  }
+  const reason = alertReasonText(status);
+  if (reason) lines.push(i(reason));
 
   const threats = status?.threatsIn ?? [];
   if (threats.length) {
+    // Group sizes, not markers: «Група БпЛА (5+)» is five drones on one track.
     const summary = new Map();
-    for (const threat of threats) summary.set(threat.name, (summary.get(threat.name) ?? 0) + 1);
+    for (const threat of threats) summary.set(threat.name, (summary.get(threat.name) ?? 0) + (threat.count ?? 1));
     lines.push('');
     lines.push('⚠️ У регіоні:');
     for (const [name, count] of summary) lines.push(`  • ${esc(name)} ×${count}`);
@@ -383,6 +479,9 @@ export function formatAlertNotification({ region, active, status }) {
 }
 
 const threatWhere = ({ stage, threat }) => {
+  // An area-only target has an oblast and nothing else — no "над", no "~N км".
+  // The oblast name is nominative, so it can't follow "на"; it stands alone.
+  if (stage === 'area') return `${threat.sourceRegion || threat.locality || 'область'} · точне місце невідоме`;
   // `destination` means the feed's point is where the target is heading, so
   // "над Обухів" would put it overhead a town it hasn't reached yet.
   const heading = threat.destination && threat.locality ? `курсом на ${threat.locality}` : '';
@@ -394,9 +493,12 @@ const threatWhere = ({ stage, threat }) => {
   const dir = threat.direction ? ` на ${threat.direction}` : '';
   const course = !heading && threat.headingWord ? `, курс ${threat.headingWord}` : '';
   const place = heading ? ` · ${heading}` : threat.locality ? ` · ${threat.locality}` : '';
-  return `~${threat.distanceKm} км${dir}${course}${place}`;
+  return `${formatDistance(threat.distanceKm, threat.uncertaintyKm)}${dir}${course}${place}`;
 };
 // threatWhere builds from feed strings (locality); escaped at the one place it is used.
+
+// "Ракета ×3" when one track is a salvo.
+const targetName = (threat) => (threat.count > 1 ? `${threat.name} ×${threat.count}` : threat.name);
 
 /**
  * Ukrainian text for one or more live threat events in a region. A single
@@ -412,9 +514,10 @@ export function formatThreatNotification({ region, events }) {
   if (events.length === 1) {
     const e = events[0];
     // "in" already reads "над <locality>"; don't prefix it again.
-    const detail = e.stage === 'in' ? esc(threatWhere(e)) : `${i('наближається:')} ${esc(threatWhere(e))}`;
+    const lead = { near: 'наближається:', area: 'по області:' }[e.stage];
+    const detail = lead ? `${i(lead)} ${esc(threatWhere(e))}` : esc(threatWhere(e));
     return [
-      `${head} ${e.threat.emoji} ${b(`${e.threat.name} — ${region.name}`)}`,
+      `${head} ${e.threat.emoji} ${b(`${targetName(e.threat)} — ${region.name}`)}`,
       detail,
       '',
       mapHint(region),
@@ -423,7 +526,7 @@ export function formatThreatNotification({ region, events }) {
 
   const lines = [`${head} ${b(region.name)}: ${events.length} ${pluralTargets(events.length)}`];
   for (const e of events.slice(0, 6)) {
-    lines.push(`  • ${e.threat.emoji} ${b(e.threat.name)} — ${esc(threatWhere(e))}`);
+    lines.push(`  • ${e.threat.emoji} ${b(targetName(e.threat))} — ${esc(threatWhere(e))}`);
   }
   if (events.length > 6) lines.push(`  ${i(`…та ще ${events.length - 6}`)}`);
   lines.push('');

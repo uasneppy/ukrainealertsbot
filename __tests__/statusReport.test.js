@@ -122,3 +122,13 @@ describe('night log and extra channels', () => {
     expect(text).toContain('⚪ @new: ще не опитувався');
   });
 });
+
+describe('API data age', () => {
+  it('says how old the API\'s data is, not just how fast it answered', () => {
+    expect(formatStatusReport({ ...base, apiDataAgeMs: 4_000 })).toContain('🟢 NEPTUN API: відповідає (280 мс), дані 4 с тому');
+  });
+
+  it('flags a fast answer that is old — a CDN holding a stale copy', () => {
+    expect(formatStatusReport({ ...base, apiDataAgeMs: 300_000 })).toContain('🟠 NEPTUN API: відповідає (280 мс), дані 300 с тому');
+  });
+});

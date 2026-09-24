@@ -36,7 +36,8 @@ const THREAT_TTL_MS = 60 * 60 * 1000;
 
 /** In-memory live state */
 const _threats = new Map(); // id → threat object
-const _alerts = { raions: [], oblasts: [] };
+// `version` orders this copy against a REST one (see liveState.js).
+const _alerts = { raions: [], oblasts: [], version: null };
 
 let _reconnectDelay = 1_000;
 let _ws = null;
@@ -53,10 +54,9 @@ export function getState(now = Date.now()) {
     const updated = Date.parse(t?.updatedAt ?? '');
     return !Number.isFinite(updated) || now - updated <= THREAT_TTL_MS;
   });
-  return {
-    threats: fresh,
-    alerts: { raions: [..._alerts.raions], oblasts: [..._alerts.oblasts] },
-  };
+  const alerts = { raions: [..._alerts.raions], oblasts: [..._alerts.oblasts] };
+  if (_alerts.version != null) alerts.version = _alerts.version;
+  return { threats: fresh, alerts };
 }
 
 /** True once the stream has delivered at least one authoritative state message. */
@@ -133,6 +133,7 @@ function handleMessage(raw) {
       _receivedSnapshot = true;
       _alerts.raions = msg.data?.raions ?? [];
       _alerts.oblasts = msg.data?.oblasts ?? [];
+      _alerts.version = Number.isFinite(msg.data?.version) ? msg.data.version : null;
       emitUpdate();
       break;
     }
@@ -239,6 +240,7 @@ export const __testables = {
     _threats.clear();
     _alerts.raions = [];
     _alerts.oblasts = [];
+    _alerts.version = null;
     _receivedSnapshot = false;
     _lastTrafficAt = 0;
     _updateListeners.clear();

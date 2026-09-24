@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 
-import { createSnapshotSource, DEFAULT_STREAM_FALLBACK_MS } from '../neptun/liveState.js';
+import { createSnapshotSource, DEFAULT_STREAM_FALLBACK_MS, DEFAULT_REST_STALE_MS } from '../neptun/liveState.js';
 
 const API_STATE = {
   threats: [{ id: 'api-1', type: 'ballistic', lat: 50, lon: 30 }],
@@ -159,5 +159,71 @@ describe('createSnapshotSource', () => {
 
     expect(snapshot.threats).toEqual([]);
     expect(snapshot.alerts).toEqual({ oblasts: [], raions: [] });
+  });
+});
+
+describe('createSnapshotSource — how old the API answer is', () => {
+  const NOW = Date.parse('2026-09-24T12:00:00Z');
+  const at = (ms) => new Date(NOW - ms).toISOString();
+
+  it('serves a snapshot NEPTUN built seconds ago', async () => {
+    const source = make({ fetchSnapshot: async () => ({ ...API_STATE, serverTime: at(4_000) }), now: () => NOW });
+    await expect(source.get()).resolves.toMatchObject({ source: 'api' });
+  });
+
+  it('treats a snapshot far older than the CDN window as no answer at all', async () => {
+    // Cloudflare serving yesterday's sky while the origin is down: fast, 200,
+    // and a picture of the past.
+    const stale = async () => ({ ...API_STATE, serverTime: at(DEFAULT_REST_STALE_MS + 1_000) });
+
+    const withStream = make({ fetchSnapshot: stale, now: () => NOW, streamAge: 5_000 });
+    await expect(withStream.get()).resolves.toMatchObject({ source: 'stream' });
+
+    const withoutStream = make({ fetchSnapshot: stale, now: () => NOW, streamHasData: false });
+    await expect(withoutStream.get()).rejects.toThrow(/s old/);
+  });
+});
+
+describe('createSnapshotSource — alerts from the newer side', () => {
+  const streamWith = (alerts) => ({ ...STREAM_STATE, alerts });
+
+  it('keeps the socket\'s alerts when they are newer than the cached REST copy', async () => {
+    // The CDN caches /alerts on its own; an alert that just ended would come
+    // back from it for one read — long enough for the watcher to announce it.
+    const source = createSnapshotSource({
+      fetchSnapshot: async () => ({ threats: [], alerts: { oblasts: [{ key: 'київська' }], raions: [], version: 100 } }),
+      getState: () => streamWith({ oblasts: [], raions: [], version: 160 }),
+      hasSnapshot: () => true,
+      streamAgeMs: () => 1_000,
+      log: silence,
+    });
+
+    const snapshot = await source.get();
+    expect(snapshot.source).toBe('api');
+    expect(snapshot.alerts).toEqual({ oblasts: [], raions: [], version: 160 });
+  });
+
+  it('keeps REST when it is newer — the socket may have missed an alerts frame', async () => {
+    const rest = { oblasts: [{ key: 'київська' }], raions: [], version: 200 };
+    const source = createSnapshotSource({
+      fetchSnapshot: async () => ({ threats: [], alerts: rest }),
+      getState: () => streamWith({ oblasts: [], raions: [], version: 160 }),
+      hasSnapshot: () => true,
+      streamAgeMs: () => 1_000,
+      log: silence,
+    });
+    expect((await source.get()).alerts).toBe(rest);
+  });
+
+  it('keeps REST as the authority when either side has no version', async () => {
+    const rest = { oblasts: [], raions: [] };
+    const source = createSnapshotSource({
+      fetchSnapshot: async () => ({ threats: [], alerts: rest }),
+      getState: () => streamWith({ oblasts: [{ key: 'київська' }], raions: [], version: 999 }),
+      hasSnapshot: () => true,
+      streamAgeMs: () => 1_000,
+      log: silence,
+    });
+    expect((await source.get()).alerts).toBe(rest);
   });
 });

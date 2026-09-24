@@ -81,6 +81,18 @@ describe('neptunStream freshness', () => {
     expect(hasSnapshot()).toBe(true); // the alerts message was authoritative
   });
 
+  it('keeps the alerts version so a REST copy can be ordered against it', () => {
+    __testables.handleMessage(raw({
+      type: 'alerts',
+      data: { version: 1790250944, updatedAt: '2026-09-24T11:55:44Z', raions: [{ key: 'бахмутський', level: 'red' }], oblasts: [] },
+    }));
+    expect(getState().alerts).toEqual({ raions: [{ key: 'бахмутський', level: 'red' }], oblasts: [], version: 1790250944 });
+
+    // A frame without one clears it rather than keeping a stale number.
+    __testables.handleMessage(raw({ type: 'alerts', data: { raions: [], oblasts: [] } }));
+    expect(getState().alerts).toEqual({ raions: [], oblasts: [] });
+  });
+
   it('heartbeat refreshes the clock without touching state', () => {
     __testables.handleMessage(raw({ type: 'heartbeat' }));
     expect(streamAgeMs()).toBeLessThan(1_000);

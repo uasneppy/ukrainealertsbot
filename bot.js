@@ -413,14 +413,62 @@ export function clearCooldown(key) {
 // ── Subscription replies ──────────────────────────────────────────────────────
 // Text builders kept separate from the handlers so they can be unit-tested.
 
+/**
+ * NEPTUN's API terms require a service that concerns people's safety to say
+ * plainly that it is not an official warning system and to point at the real
+ * one. It also happens to be true: this bot reads an aggregator of channel
+ * posts, and a push that arrives late or wrong must not be what anyone waits
+ * for instead of the siren.
+ */
+export const OFFICIAL_ALERTS_NOTE =
+  'Дані NEPTUN (neptun.in.ua) — інформаційний агрегатор, а не офіційна система оповіщення: можливі неточності й затримки. Орієнтуйтеся на офіційний сигнал повітряної тривоги.';
+
+/** /start and /help: what to type, what to subscribe to, and what this is not. */
+export function formatHelp() {
+  return [
+    `🗺 ${b('Карта повітряних загроз')}`,
+    '',
+    b('Напиши в чат:'),
+    `  • ${b('тривога')} — мапа загроз України`,
+    `  • ${b('київ')} або ${b('тривога харків')} — мапа регіону`,
+    `  • ${b('чому тривога')} — що пишуть канали моніторингу`,
+    `  • ${b('що за ніч київ')} — підсумок ночі`,
+    '',
+    b('Команди:'),
+    `  • /map ${esc('<регіон>')} — мапа`,
+    `  • /subscribe ${esc('<регіон>')} — тривога й відбій (жовтий і червоний рівні), цілі поблизу`,
+    '  • /settings — що саме надсилати',
+    `  • /night ${esc('<регіон>')} — підсумок ночі`,
+    '  • /status — стан бота',
+    '',
+    i(OFFICIAL_ALERTS_NOTE),
+  ].join('\n');
+}
+
+/**
+ * Settings categories for an alert transition. A yellow alert — its start and
+ * the відбій of one that never went red — is also 'yellow', so a chat that
+ * turned yellow off hears only red; anything touching red (a red start, a rise
+ * to red, the drop from red back to yellow, the відбій of an alert that was
+ * red) is plain 'alert' and reaches everyone who wants alerts at all.
+ */
+export function alertRoute(event) {
+  const yellowOnly = event?.active
+    ? event.level === 'yellow' && !event.previousLevel
+    : event?.peakLevel === 'yellow';
+  return yellowOnly ? ['alert', 'yellow'] : 'alert';
+}
+
 export function formatSubscribeReply(result, query) {
   if (result.ok) {
     return [
       `✅ ${b('Підписано на сповіщення:')} ${b(result.region.name)}`,
       '',
-      'Надсилатиму тривогу та відбій, цілі поблизу та загальнодержавні загрози (балістика, МіГ-31К, авіація, «Калібри», пуски БпЛА).',
+      'Надсилатиму тривогу та відбій (зокрема зміну жовтого й червоного рівнів), цілі поблизу та загальнодержавні загрози (балістика, МіГ-31К, авіація, «Калібри», пуски БпЛА).',
       '',
       `⚙️ Що саме надсилати: /settings`,
+      '',
+      i(OFFICIAL_ALERTS_NOTE),
     ].join('\n');
   }
   switch (result.reason) {
@@ -538,7 +586,7 @@ if (token && !isTestEnv) {
 
   const notifyRegionEvent = (event) => {
     if (event.kind === 'alert') {
-      chatNotifier.deliver({ category: 'alert', text: formatAlertNotification(event), chatIds: event.chatIds });
+      chatNotifier.deliver({ category: alertRoute(event), text: formatAlertNotification(event), chatIds: event.chatIds });
       return;
     }
     if (event.kind === 'threat') {
@@ -771,6 +819,17 @@ if (token && !isTestEnv) {
     }
   });
 
+  // ── /start, /help — what the bot does and what it is not ────────────────────
+  // Telegram sends /start on first contact; without a handler the first thing a
+  // new user got was silence.
+  bot.onText(/^\/(?:start|help)(?:@\S+)?(?:\s.*)?$/, async (msg) => {
+    try {
+      await bot.sendMessage(msg.chat.id, formatHelp(), htmlOpts());
+    } catch (error) {
+      console.error('Failed to send help:', error?.message ?? error);
+    }
+  });
+
   // ── /map command — on-demand REST fetch; "/map київ" renders a region ───────
   bot.onText(/^\/map(?:@\S+)?(?:\s+(.+))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
@@ -875,12 +934,17 @@ if (token && !isTestEnv) {
       // "can we answer right now" is the only question worth asking here.
       let apiOk = false;
       let apiLatencyMs = 0;
+      let apiDataAgeMs = null;
       let apiError = null;
       const startedAt = Date.now();
       try {
-        await fetchSnapshot();
+        const snapshot = await fetchSnapshot();
         apiOk = true;
         apiLatencyMs = Date.now() - startedAt;
+        // A fast answer can still be an old one: the CDN in front of the API
+        // may serve a cached snapshot, and on an origin error a stale one.
+        const serverTime = Date.parse(snapshot?.serverTime ?? '');
+        if (Number.isFinite(serverTime)) apiDataAgeMs = Math.max(0, Date.now() - serverTime);
       } catch (err) {
         apiError = err?.message ?? String(err);
       }
@@ -890,6 +954,7 @@ if (token && !isTestEnv) {
         streamAgeMs: streamAgeMs(),
         apiOk,
         apiLatencyMs,
+        apiDataAgeMs,
         apiError,
         geoAgeMs: await geoCacheAgeMs(),
         ai: getAiHealth(),
