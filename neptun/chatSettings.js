@@ -24,7 +24,11 @@ const FORMAT_VERSION = 1;
  * callback payload use; everything else is the user-facing label.
  */
 export const NOTIFY_CATEGORIES = Object.freeze([
-  { key: 'alert',     emoji: '🔴', label: 'Тривога / відбій',      hint: 'початок і кінець тривоги у ваших регіонах' },
+  { key: 'alert',     emoji: '🔴', label: 'Тривога / відбій',      hint: 'початок і кінець тривоги у ваших регіонах, зміна рівня' },
+  // Yellow is a drone threat where life largely goes on; a chat that wants to
+  // be woken only for red can turn it off. Red, a level rising to red, and
+  // the відбій of an alert that reached red always go out under 'alert'.
+  { key: 'yellow',    emoji: '🟡', label: 'Жовтий рівень',         hint: 'тривоги через дронову загрозу; вимкніть, щоб отримувати лише червоний рівень' },
   { key: 'targets',   emoji: '🚀', label: 'Цілі поблизу',          hint: 'ракети та КАБи, що наближаються до регіону' },
   { key: 'ballistic', emoji: '💥', label: 'Балістика',             hint: 'загроза або пуск балістики' },
   { key: 'mig31k',    emoji: '🛩', label: 'МіГ-31К / «Кинджал»',   hint: 'зліт носіїв і пуски' },

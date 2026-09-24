@@ -12,40 +12,66 @@ const TIMEOUT_MS = 8_000;
 
 /**
  * Fetches the current threat list.
- * @returns {Promise<Array>} Array of threat objects.
+ * @returns {Promise<{ threats: Array, serverTime: string|null }>} `serverTime`
+ *   is when NEPTUN built the snapshot — the only way to tell a fresh answer
+ *   from one a CDN has been holding.
  */
-export async function fetchThreats() {
+export async function fetchThreatsSnapshot() {
   const response = await fetchWithTimeout(`${BASE}/threats`, { timeoutMs: TIMEOUT_MS });
   if (!response.ok) {
     throw new Error(`NEPTUN threats API error: HTTP ${response.status}`);
   }
   const data = await response.json();
   // The API may return { threats: [...] } or just [...]
-  return Array.isArray(data) ? data : (data.threats ?? []);
+  return {
+    threats: Array.isArray(data) ? data : (data?.threats ?? []),
+    serverTime: typeof data?.serverTime === 'string' ? data.serverTime : null,
+  };
+}
+
+/**
+ * Fetches the current threat list.
+ * @returns {Promise<Array>} Array of threat objects.
+ */
+export async function fetchThreats() {
+  return (await fetchThreatsSnapshot()).threats;
 }
 
 /**
  * Fetches the current air-raid alert state.
- * @returns {Promise<{ raions: string[], oblasts: string[] }>}
+ *
+ * Entries carry `level` ('red' | 'yellow') and `reasons`; the payload carries
+ * `version` and `updatedAt` — when the alert state last *changed*, not when
+ * this copy was made, so they order two copies but can't age one on its own.
+ *
+ * @returns {Promise<{ raions: Array, oblasts: Array, version?: number, updatedAt?: string }>}
  */
 export async function fetchAlerts() {
   const response = await fetchWithTimeout(`${BASE}/alerts`, { timeoutMs: TIMEOUT_MS });
   if (!response.ok) {
     throw new Error(`NEPTUN alerts API error: HTTP ${response.status}`);
   }
-  const data = await response.json();
-  return {
-    raions: data.raions ?? [],
-    oblasts: data.oblasts ?? [],
+  return normalizeAlertsPayload(await response.json());
+}
+
+/** `{ raions, oblasts }` plus the version stamps when the payload has them. */
+export function normalizeAlertsPayload(data) {
+  const alerts = {
+    raions: data?.raions ?? [],
+    oblasts: data?.oblasts ?? [],
   };
+  if (Number.isFinite(data?.version)) alerts.version = data.version;
+  if (typeof data?.updatedAt === 'string') alerts.updatedAt = data.updatedAt;
+  return alerts;
 }
 
 /**
  * Convenience: fetch both threats and alerts in parallel.
+ * @returns {Promise<{ threats: Array, alerts: object, serverTime: string|null }>}
  */
 export async function fetchSnapshot() {
-  const [threats, alerts] = await Promise.all([fetchThreats(), fetchAlerts()]);
-  return { threats, alerts };
+  const [{ threats, serverTime }, alerts] = await Promise.all([fetchThreatsSnapshot(), fetchAlerts()]);
+  return { threats, alerts, serverTime };
 }
 
 /**

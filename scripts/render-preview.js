@@ -19,9 +19,12 @@ const mode = process.argv[2] ?? 'mock';
 const out = process.argv[3] ?? `/tmp/preview-${mode}.png`;
 const regionArg = process.argv[4] ?? null;
 
+const RED = { level: 'red', reasons: ['Ракетна загроза (червоний рівень)'] };
+const YELLOW = { level: 'yellow', reasons: ['Дронова загроза (жовтий рівень)'] };
+
 const MOCK = {
   threats: [
-    { id: 'm1', type: 'uav',      title: 'БпЛА',           lat: 50.62, lon: 29.25, locality: 'Малин',    region: 'Житомирська область', heading: 120 },
+    { id: 'm1', type: 'uav',      title: 'Група БпЛА (5+)', count: 5, lat: 50.62, lon: 29.25, locality: 'Малин', region: 'Житомирська область', heading: 120 },
     { id: 'm2', type: 'uav',      title: 'БпЛА',           lat: 51.05, lon: 31.90, locality: 'Ніжин',    region: 'Чернігівська область', heading: 200 },
     { id: 'm3', type: 'fpv',      title: 'FPV-дрон',       lat: 49.95, lon: 36.45, locality: 'Чугуїв',   region: 'Харківська область' },
     { id: 'm4', type: 'missile',  title: 'Крилата ракета', lat: 48.55, lon: 31.95, locality: 'Новоукраїнка', region: 'Кіровоградська область', heading: 315 },
@@ -30,6 +33,12 @@ const MOCK = {
     { id: 'm7', type: 'recon',    title: 'Розвідник',      lat: 51.30, lon: 33.40, locality: 'Конотоп',  region: 'Сумська область' },
     { id: 'm8', type: 'mig31k',   title: 'МіГ-31К',        lat: 46.10, lon: 33.60 },
     { id: 'm9', type: 'shahed-x', title: 'Новий тип',      lat: 47.60, lon: 34.30 },
+    // Area-only: the sources named an oblast, nothing more — lat/lon is its
+    // centroid. Must render as a "по області" chip, never as a marker.
+    { id: 'a1', type: 'uav', title: 'БпЛА — по області', region: 'Дніпропетровська область', locality: 'Дніпропетровська область',
+      lat: 48.27085836179639, lon: 34.78592104996836, heading: null, uncertaintyKm: 70, positionQuality: 'approx', areaOnly: true },
+    { id: 'a2', type: 'missile', title: 'Ракета — по області', region: 'Дніпропетровська область', locality: 'Дніпропетровська область',
+      lat: 48.27085836179639, lon: 34.78592104996836, heading: null, uncertaintyKm: 70, positionQuality: 'approx', areaOnly: true },
     // Kyiv-area scenario for region previews (with trails, as in the live feed):
     {
       id: 'k1', type: 'uav', title: 'БпЛА', lat: 50.5111, lon: 30.7909,
@@ -50,24 +59,28 @@ const MOCK = {
     },
   ],
   alerts: {
+    // Levels as NEPTUN sends them since September 2026: red — missile /
+    // massive drone threat, yellow — drone threat.
     oblasts: [
-      { key: 'харківська', name: 'Харківська область', since: '2026-07-18T17:20:00Z' },
-      { key: 'луганська',  name: 'Луганська область',  since: '2022-04-04T16:45:00Z' },
-      { key: 'автономна республіка крим', name: 'АР Крим', since: '2022-12-10T22:22:00Z' },
-      { key: 'м. київ',    name: 'м. Київ',            since: '2026-07-18T18:05:00Z' },
+      { key: 'харківська', name: 'Харківська область', since: '2026-07-18T17:20:00Z', ...RED },
+      { key: 'луганська',  name: 'Луганська область',  since: '2022-04-04T16:45:00Z', level: 'red' },
+      { key: 'автономна республіка крим', name: 'АР Крим', since: '2022-12-10T22:22:00Z', level: 'red' },
+      { key: 'м. київ',    name: 'м. Київ',            since: '2026-07-18T18:05:00Z', ...YELLOW },
+      // A yellow oblast with a red district inside it (дніпровський, below):
+      { key: 'дніпропетровська', name: 'Дніпропетровська область', since: '2026-07-18T18:02:00Z', ...YELLOW },
     ],
     raions: [
-      { key: 'кременчуцький', name: 'Кременчуцький район', oblast: 'Полтавська область', since: '2026-07-18T18:10:00Z' },
-      { key: 'одеський',      name: 'Одеський район',      oblast: 'Одеська область',    since: '2026-07-18T18:12:00Z' },
-      { key: 'сумський',      name: 'Сумський район',      oblast: 'Сумська область',    since: '2026-07-18T18:14:00Z' },
-      { key: 'дніпровський',  name: 'Дніпровський район',  oblast: 'Дніпропетровська область', since: '2026-07-18T18:16:00Z' },
-      { key: 'львівський',    name: 'Львівський район',    oblast: 'Львівська область',  since: '2026-07-18T18:18:00Z' },
-      { key: 'чернігівський', name: 'Чернігівський район', oblast: 'Чернігівська область', since: '2026-07-18T18:20:00Z' },
+      { key: 'кременчуцький', name: 'Кременчуцький район', oblast: 'Полтавська область', since: '2026-07-18T18:10:00Z', ...RED },
+      { key: 'одеський',      name: 'Одеський район',      oblast: 'Одеська область',    since: '2026-07-18T18:12:00Z', ...YELLOW },
+      { key: 'сумський',      name: 'Сумський район',      oblast: 'Сумська область',    since: '2026-07-18T18:14:00Z', ...YELLOW },
+      { key: 'дніпровський',  name: 'Дніпровський район',  oblast: 'Дніпропетровська область', since: '2026-07-18T18:16:00Z', ...RED },
+      { key: 'львівський',    name: 'Львівський район',    oblast: 'Львівська область',  since: '2026-07-18T18:18:00Z', ...YELLOW },
+      { key: 'чернігівський', name: 'Чернігівський район', oblast: 'Чернігівська область', since: '2026-07-18T18:20:00Z', ...YELLOW },
       // Kyiv oblast raions (for the region previews):
-      { key: 'бориспільський', name: 'Бориспільський район', oblast: 'Київська область', since: '2026-07-18T18:06:00Z' },
-      { key: 'броварський',    name: 'Броварський район',    oblast: 'Київська область', since: '2026-07-18T18:07:00Z' },
-      // In a fully-alerted oblast — must be suppressed (covered by oblast red):
-      { key: 'харківський',   name: 'Харківський район',   oblast: 'Харківська область', since: '2026-07-18T17:20:00Z' },
+      { key: 'бориспільський', name: 'Бориспільський район', oblast: 'Київська область', since: '2026-07-18T18:06:00Z', ...YELLOW },
+      { key: 'броварський',    name: 'Броварський район',    oblast: 'Київська область', since: '2026-07-18T18:07:00Z', ...RED },
+      // In a fully-alerted oblast at the same level — must be suppressed:
+      { key: 'харківський',   name: 'Харківський район',   oblast: 'Харківська область', since: '2026-07-18T17:20:00Z', ...RED },
     ],
   },
 };

@@ -17,7 +17,14 @@ import {
   THREAT_COLORS,
   THREAT_EMOJI,
   THREAT_NAMES_UA,
+  ALERT_LEVEL_EMOJI,
+  ALERT_LEVEL_WORDS,
   computeAlertKeySets,
+  computeAlertLevels,
+  entryAlertLevel,
+  normalizeAlertKey,
+  isAreaOnly,
+  groupSize,
   threatDisplayName,
 } from './threatMeta.js';
 import { esc, b, i } from './telegramFormat.js';
@@ -36,6 +43,7 @@ export {
   normalizeAlertKey,
   extractAlertKeys,
   computeAlertKeySets,
+  computeAlertLevels,
 } from './threatMeta.js';
 
 // ── Cities labelled on the map ────────────────────────────────────────────────
@@ -57,9 +65,11 @@ export const CITY_LABELS = [
 // colors per threat type live in THREAT_COLORS (threatMeta.js) — kept
 // separate since those are keyed by type, not by map layer.
 //
-// Alert severity is a two-step ladder (amber → red) instead of one pink wash,
-// so a district-level alert and a whole-oblast alert read as different
-// severities at a glance instead of blurring into the same muddy tone.
+// An alert is filled in its level's colour — yellow or red, the colours the
+// official alert system uses since September 2026 — so the map says what
+// people there are told to do. Scope needs no colour of its own: a whole
+// oblast and a district are different shapes. (Scope used to be the colour —
+// amber district, red oblast — which drew a red district alert as yellow.)
 export const MAP_COLORS = {
   bg:                 '#080c14',  // page / space beyond the country outline
   oblastFill:         '#141e30',  // unalerted oblast fill
@@ -67,10 +77,10 @@ export const MAP_COLORS = {
   raionGrid:          '#22314a',  // thin raion grid lines (texture only)
   countryOutline:     '#7fb2e8',  // Ukraine border
 
-  raionAlertFill:     '#f5a623',  // district-level alert — amber "watch"
-  raionAlertBorder:   '#f5a623',
-  oblastAlertFill:    '#e0303f',  // whole-oblast alert — red "active"
-  oblastAlertBorder:  '#ff5468',
+  redAlertFill:       '#e0303f',  // red level — missile / massive drone threat
+  redAlertBorder:     '#ff5468',
+  yellowAlertFill:    '#ffd23f',  // yellow level — drone threat
+  yellowAlertBorder:  '#ffd84d',
 
   cityDot:            '#eaf2fb',
   cityLabel:          '#f2f7fd',
@@ -87,6 +97,7 @@ export const MAP_COLORS = {
   legendLabel:        '#8ab4d4',
   legendText:         '#cdd9e5',
 
+  areaChipBorder:      '#cdd9e5', // dashed border of an area-only ("по області") chip
   focusOutline:        '#eaf2fb', // dashed oblast-of-interest outline
   focusCityRing:       '#ffffff',
   titleDot:            '#ff4444',
@@ -209,7 +220,10 @@ export function computeCityFrameKm({ threatsIn = [], threatsNear = [] } = {}) {
   return Math.min(frameKm, CITY_FRAME_MAX_KM);
 }
 
-/** Per-type counts, names, emoji and colours for the legend and captions. */
+/**
+ * Per-type counts, names, emoji and colours for the legend and captions.
+ * `count` is objects, not markers: a «Група БпЛА (5+)» track adds five.
+ */
 export function computeTypeMeta(threats = []) {
   const typeMeta = {};
   for (const t of threats) {
@@ -222,7 +236,7 @@ export function computeTypeMeta(threats = []) {
         color: THREAT_COLORS[type] ?? THREAT_COLORS.unknown,
       };
     }
-    typeMeta[type].count += 1;
+    typeMeta[type].count += groupSize(t);
   }
   return typeMeta;
 }
@@ -305,8 +319,19 @@ function buildSkeletonHtml({ js, css }) {
   .legend-alert { display: flex; align-items: center; gap: 7px;
     color: ${C.legendText}; font-size: 13px; margin: 5px 0 0; }
   .alert-swatch { width: 14px; height: 10px; border-radius: 2px; flex-shrink: 0; }
-  .alert-swatch-raion  { background: ${C.raionAlertFill}66; border: 1px solid ${C.raionAlertBorder}; }
-  .alert-swatch-oblast { background: ${C.oblastAlertFill}99; border: 1px solid ${C.oblastAlertBorder}; }
+  .alert-swatch-red    { background: ${C.redAlertFill}99; border: 1px solid ${C.redAlertBorder}; }
+  .alert-swatch-yellow { background: ${C.yellowAlertFill}99; border: 1px solid ${C.yellowAlertBorder}; }
+
+  /* An area-only track: the sources named an oblast, not a place. A text chip
+     at the oblast's middle, dashed so it never reads as a marker — no icon,
+     no trail, no course. */
+  .area-chip {
+    position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
+    font: 700 12px/1.2 sans-serif; color: ${C.threatLabel}; white-space: nowrap;
+    background: ${C.labelChip}; border: 1.5px dashed ${C.areaChipBorder};
+    padding: 3px 8px; border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.6);
+  }
 
   .title-bar {
     position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
@@ -341,7 +366,7 @@ function buildSkeletonHtml({ js, css }) {
 function _renderOnPage(payload) {
   const {
     ukraine, oblasts, raions,
-    threats, alertedOblastKeys, alertedRaionKeys,
+    threats, alertedOblastKeys, alertedRaionKeys, alertLevels, raionsOverAlert, areaChips,
     typeMeta, iconDataUrls, cities, timestamp, focusView, colors, tiles,
   } = payload;
   const C = colors;
@@ -359,6 +384,15 @@ function _renderOnPage(payload) {
 
   const oblastSet = new Set(alertedOblastKeys);
   const raionSet = new Set(alertedRaionKeys);
+  // A key with no level is red — see entryAlertLevel() on the Node side.
+  const oblastLevel = (k) => (alertLevels && alertLevels.oblast && alertLevels.oblast[k]) || 'red';
+  const raionLevel = (k) => (alertLevels && alertLevels.raion && alertLevels.raion[k]) || 'red';
+  const overAlert = new Set(raionsOverAlert || []);
+  const fillOf = (level) => (level === 'yellow' ? C.yellowAlertFill : C.redAlertFill);
+  // Yellow at red's opacity turns mustard-brown on the dark base map and stops
+  // reading as "yellow"; a little more of it keeps the two levels nameable.
+  const alphaOf = (level, alpha) => (level === 'yellow' ? alpha + 0.14 : alpha);
+  const borderOf = (level) => (level === 'yellow' ? C.yellowAlertBorder : C.redAlertBorder);
 
   // Street tiles (city view only). When present they are the basemap, so the
   // opaque oblast fill is dropped and the alert fills are softened to let the
@@ -388,11 +422,11 @@ function _renderOnPage(payload) {
     }).addTo(map);
   }
 
-  // 1. Oblast fills — whole-oblast alert → strong red "active" tone. Over tiles
+  // 1. Oblast fills — a whole-oblast alert in its level's colour. Over tiles
   //    the unalerted fill is dropped entirely and the alert tint is softened.
   L.geoJSON(oblasts, {
     style: (f) => (oblastSet.has(featKey(f))
-      ? { stroke: false, fillColor: C.oblastAlertFill, fillOpacity: hasTiles ? 0.28 : 0.42 }
+      ? { stroke: false, fillColor: fillOf(oblastLevel(featKey(f))), fillOpacity: alphaOf(oblastLevel(featKey(f)), hasTiles ? 0.28 : 0.42) }
       : { stroke: false, fillColor: C.oblastFill, fillOpacity: hasTiles ? 0 : 0.94 }),
   }).addTo(map);
 
@@ -404,18 +438,29 @@ function _renderOnPage(payload) {
     }).addTo(map);
   }
 
-  // 3. Alerted raions — amber "watch" fill (individual districts, lower
-  //    severity than a whole-oblast alert, so a distinct hue rather than a
-  //    paler version of the same red)
+  // 3. Alerted raions — the same level colours as a whole oblast. A raion
+  //    only survives on top of an alerted oblast when it is more severe (red
+  //    inside yellow); painted straight over the yellow it mixes to orange, a
+  //    third colour that means nothing. So the oblast fill is knocked out under
+  //    it first, and its red is the same red as everywhere else.
+  if (overAlert.size && !hasTiles) {
+    L.geoJSON(raions, {
+      filter: (f) => overAlert.has(featKey(f)),
+      style: () => ({ stroke: false, fillColor: C.oblastFill, fillOpacity: 1 }),
+    }).addTo(map);
+  }
   L.geoJSON(raions, {
     filter: (f) => raionSet.has(featKey(f)),
-    style: () => ({ color: C.raionAlertBorder, weight: 1.1, opacity: 0.9, fillColor: C.raionAlertFill, fillOpacity: hasTiles ? 0.20 : 0.30 }),
+    style: (f) => {
+      const level = raionLevel(featKey(f));
+      return { color: borderOf(level), weight: 1.1, opacity: 0.9, fillColor: fillOf(level), fillOpacity: alphaOf(level, hasTiles ? 0.28 : 0.42) };
+    },
   }).addTo(map);
 
   // 4. Oblast borders above the fills
   L.geoJSON(oblasts, {
     style: (f) => (oblastSet.has(featKey(f))
-      ? { color: C.oblastAlertBorder, weight: 1.8, opacity: 1, fill: false }
+      ? { color: borderOf(oblastLevel(featKey(f))), weight: 1.8, opacity: 1, fill: false }
       : { color: C.oblastBorder, weight: 1.15, opacity: 1, fill: false }),
   }).addTo(map);
 
@@ -544,6 +589,21 @@ function _renderOnPage(payload) {
 
     L.marker([t.lat, t.lon], { interactive: false, keyboard: false, zIndexOffset: 1000, icon }).addTo(map);
   });
+
+  // 7b. Area-only tracks — one text chip per oblast at its middle, which is all
+  //     the feed's lat/lon means for them. Never an icon: an icon is a place.
+  //     Above the markers: during a raid the middle of an oblast is often
+  //     under a cluster of them, and a half-covered marker is still readable
+  //     where "Б▯ЛА · по області" is not.
+  (areaChips || []).forEach((chip) => {
+    if (typeof chip.lat !== 'number' || typeof chip.lon !== 'number' || !inView(chip)) return;
+    L.marker([chip.lat, chip.lon], {
+      interactive: false,
+      keyboard: false,
+      zIndexOffset: 1100,
+      icon: L.divIcon({ className: '', iconSize: [0, 0], html: '<div class="area-chip">' + chip.label + '</div>' }),
+    }).addTo(map);
+  });
   /* eslint-enable no-undef */
 
 
@@ -561,11 +621,20 @@ function _renderOnPage(payload) {
     return '<div class="legend-item">' + visual + '<span>' + esc(meta.name) + ' ×' + meta.count + '</span></div>';
   }).join('');
 
-  const alertRows =
-    (alertedRaionKeys.length
-      ? '<div class="legend-alert"><div class="alert-swatch alert-swatch-raion"></div><span>Тривога — район</span></div>' : '') +
-    (alertedOblastKeys.length
-      ? '<div class="legend-alert"><div class="alert-swatch alert-swatch-oblast"></div><span>Тривога — вся область</span></div>' : '');
+  // One row per level on the map. With no level in the feed at all there is
+  // one plain "Тривога" row — the legend doesn't claim a colour it wasn't told.
+  const levelsShown = new Set([
+    ...alertedOblastKeys.map(oblastLevel),
+    ...alertedRaionKeys.map(raionLevel),
+  ]);
+  const alertRow = (level, text) =>
+    '<div class="legend-alert"><div class="alert-swatch alert-swatch-' + level + '"></div><span>' + text + '</span></div>';
+  const alertRows = !levelsShown.size
+    ? ''
+    : !(alertLevels && alertLevels.known)
+      ? alertRow('red', 'Тривога')
+      : (levelsShown.has('red') ? alertRow('red', 'Тривога — червоний рівень') : '')
+        + (levelsShown.has('yellow') ? alertRow('yellow', 'Тривога — жовтий рівень') : '');
 
   const total = Object.keys(typeMeta).reduce((s, k) => s + typeMeta[k].count, 0);
   const legendHtml = '<div class="legend"><div class="legend-title">Загрози (' + total + ')</div>'
@@ -596,7 +665,7 @@ function _renderOnPage(payload) {
   const grow = (r, p) => ({ left: r.left - p, top: r.top - p, right: r.right + p, bottom: r.bottom + p });
 
   const obstacles = [];
-  document.querySelectorAll('.threat-icon, .threat-emoji, .threat-label, .legend, .title-bar').forEach((el) => {
+  document.querySelectorAll('.threat-icon, .threat-emoji, .threat-label, .area-chip, .legend, .title-bar').forEach((el) => {
     obstacles.push(grow(el.getBoundingClientRect(), 3));
   });
 
@@ -684,6 +753,15 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
   const { ukraine, oblasts, raions } = geoData;
 
   const { oblastKeys, raionKeys } = computeAlertKeySets(alerts);
+  const { oblastLevels, raionLevels, levelsKnown } = computeAlertLevels(alerts);
+  // Raions still drawn inside an alerted oblast — only the more severe ones
+  // survive computeAlertKeySets — are painted over the oblast fill.
+  const oblastKeySet = new Set(oblastKeys);
+  const raionKeySet = new Set(raionKeys);
+  const raionsOverAlert = (alerts.raions ?? [])
+    .filter((e) => e && typeof e === 'object' && oblastKeySet.has(normalizeAlertKey(e.oblast)))
+    .map((e) => normalizeAlertKey(e))
+    .filter((k) => raionKeySet.has(k));
 
   // Focused (region-detail) mode: the legend and caption cover only threats in
   // or near the region.
@@ -705,7 +783,10 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
     metaSource = [...focusStatus.threatsIn, ...focusStatus.threatsNear]
       .filter((t) => t.distanceKm <= cityFrameKm);
   } else {
-    metaSource = [...focusStatus.threatsIn, ...focusStatus.threatsNear];
+    // Oblast view: its area-only tracks are on the map as a chip at the
+    // oblast's middle, so they count. The city frame above leaves them out —
+    // that chip is almost never inside a city frame.
+    metaSource = [...focusStatus.threatsIn, ...focusStatus.threatsNear, ...(focusStatus.threatsArea ?? [])];
   }
 
   // Per-type metadata for markers, legend and caption.
@@ -745,13 +826,14 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
     const escapeHtml = (s) => String(s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    const slimThreats = threats.map((t) => {
+    const slimThreats = threats.filter((t) => !isAreaOnly(t)).map((t) => {
       const type = String(t?.type ?? 'unknown').toLowerCase();
       const entry = { lat: t?.lat, lon: t?.lon, type };
       if (focus) {
         // "Загроза балістики · Київ" for an advisory, not "Балістика · Київ" —
-        // the label is read as "what is over my city".
-        const label = `${threatDisplayName(t)}${t?.locality ? ' · ' + t.locality : ''}`.trim();
+        // the label is read as "what is over my city". "×5" for a group.
+        const size = groupSize(t);
+        const label = `${threatDisplayName(t)}${size > 1 ? ' ×' + size : ''}${t?.locality ? ' · ' + t.locality : ''}`.trim();
         if (label) entry.label = escapeHtml(label);
         if (Number.isFinite(t?.heading)) entry.heading = t.heading;
         const trail = (Array.isArray(t?.trail) ? t.trail : [])
@@ -762,6 +844,23 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
       }
       return entry;
     });
+
+    // Area-only tracks: one chip per oblast, "БпЛА ×2, Ракета · по області",
+    // at the centroid the feed gives — the one thing that point is good for.
+    const areaGroups = new Map();
+    for (const t of threats) {
+      if (!isAreaOnly(t) || !Number.isFinite(t?.lat) || !Number.isFinite(t?.lon)) continue;
+      const key = normalizeAlertKey(t.region) || `${t.lat},${t.lon}`;
+      const group = areaGroups.get(key) ?? { lat: t.lat, lon: t.lon, names: new Map() };
+      const name = threatDisplayName(t);
+      group.names.set(name, (group.names.get(name) ?? 0) + groupSize(t));
+      areaGroups.set(key, group);
+    }
+    const areaChips = [...areaGroups.values()].map((g) => ({
+      lat: g.lat,
+      lon: g.lon,
+      label: escapeHtml(`${[...g.names].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(', ')} · по області`),
+    }));
 
     let focusView = null;
     if (focus && focus.kind === 'oblast') {
@@ -778,6 +877,9 @@ export async function renderNeptunMap({ threats = [], alerts = {}, geo, focus = 
       threats: slimThreats,
       alertedOblastKeys: oblastKeys,
       alertedRaionKeys: raionKeys,
+      alertLevels: { oblast: oblastLevels, raion: raionLevels, known: levelsKnown },
+      raionsOverAlert,
+      areaChips,
       typeMeta, iconDataUrls,
       cities: CITY_LABELS,
       timestamp,
@@ -821,14 +923,22 @@ function buildCaption(typeMeta, alerts, date) {
     blocks.push(`✅ ${b('Активних загроз не виявлено')}`);
   }
 
-  const oblastCount = (alerts.oblasts ?? []).length;
-  const raionCount = (alerts.raions ?? []).length;
-  if (oblastCount > 0 || raionCount > 0) {
+  // One line per level, red first. Without any level in the feed it stays
+  // the single "Тривога" line — no colour the feed didn't state.
+  const { levelsKnown } = computeAlertLevels(alerts);
+  const alertLines = [];
+  for (const level of levelsKnown ? ['red', 'yellow'] : [null]) {
+    const matches = (e) => level == null || entryAlertLevel(e).level === level;
+    const oblastCount = (alerts.oblasts ?? []).filter(matches).length;
+    const raionCount = (alerts.raions ?? []).filter(matches).length;
+    if (!oblastCount && !raionCount) continue;
     const parts = [];
     if (oblastCount > 0) parts.push(`областей: ${oblastCount}`);
     if (raionCount > 0) parts.push(`районів: ${raionCount}`);
-    blocks.push(`🔴 ${b('Тривога')} — ${parts.join(', ')}`);
+    const title = level ? `Тривога, ${ALERT_LEVEL_WORDS[level]}` : 'Тривога';
+    alertLines.push(`${ALERT_LEVEL_EMOJI[level ?? 'red']} ${b(title)} — ${parts.join(', ')}`);
   }
+  if (alertLines.length) blocks.push(alertLines.join('\n'));
 
   const timeStr = date.toLocaleTimeString('uk-UA', {
     hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kyiv',

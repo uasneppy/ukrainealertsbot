@@ -20,7 +20,7 @@ import {
   findOblastFeature, featureBbox, pointInFeature, distanceToBboxKm, distanceToFeatureKm, haversineKm,
   fmtKyivTime,
 } from './regionContext.js';
-import { THREAT_EMOJI, THREAT_NAMES_UA } from './threatMeta.js';
+import { THREAT_EMOJI, THREAT_NAMES_UA, normalizeAlertKey } from './threatMeta.js';
 import { detectEvents, EVENT_KINDS } from './eventDetector.js';
 import { relevantRegionKeys, messageConcerns } from './regionMentions.js';
 import { nightWindow } from './nightLog.js';
@@ -33,8 +33,15 @@ const LAUNCH_BUCKET_MS = 30 * 60 * 1000;
 /**
  * Classifies a stored track against a region: 'in' if any recorded position
  * was inside it, 'near' if one came within reach, else null.
+ *
+ * A track that was only ever reported for a whole oblast (`areaRegion`, no
+ * samples) counts for that oblast and for nothing else — "somewhere in the
+ * oblast" is not "over the city", nor "near" it.
  */
 export function classifyTrack(track, region, geo) {
+  if (region.kind === 'oblast' && track.areaRegion && normalizeAlertKey(track.areaRegion) === region.geoKey) {
+    return 'in';
+  }
   let best = null;
   const promote = (v) => { if (v === 'in' || (v === 'near' && best !== 'in')) best = v; };
   if (region.kind === 'city') {

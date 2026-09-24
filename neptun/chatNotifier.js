@@ -41,7 +41,9 @@ export function createChatNotifier({
 
   /**
    * @param {object} opts
-   * @param {string}   opts.category  a NOTIFY_CATEGORIES key
+   * @param {string|string[]} opts.category  a NOTIFY_CATEGORIES key, or several
+   *                                  that must all be on (a yellow alert is both
+   *                                  an alert and a yellow one)
    * @param {string}   opts.text
    * @param {string[]} opts.chatIds
    * @param {string}   [opts.key]     dedupe key; omit for messages that must always go
@@ -51,10 +53,12 @@ export function createChatNotifier({
     const t = now();
     const result = { sent: [], muted: [], deduped: [] };
     const base = key && key.includes('|') ? key.slice(0, key.indexOf('|')) : null;
+    const categories = [].concat(category);
 
     for (const chatId of chatIds) {
       const id = String(chatId);
-      if (getSettings(id)?.[category] === false) {
+      const settings = getSettings(id);
+      if (categories.some((c) => settings?.[c] === false)) {
         result.muted.push(id);
         continue;
       }

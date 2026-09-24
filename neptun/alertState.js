@@ -22,7 +22,13 @@ export function getAlertStateFile() {
   return process.env.ALERT_STATE_FILE || path.join(__dirname, '..', 'data', 'alertState.json');
 }
 
-let _states = new Map(); // cacheKey → { confirmed: boolean, at: epoch ms }
+// cacheKey → { confirmed: boolean, at: epoch ms, level?: 'red'|'yellow' }.
+// `level` is absent in files written before alert levels existed; the watcher
+// treats that as "on, level unknown" rather than guessing one.
+let _states = new Map();
+
+const withLevel = (entry, level) => (level === 'red' || level === 'yellow' ? { ...entry, level } : entry);
+
 let _writeChain = Promise.resolve();
 
 export function flushAlertState() {
@@ -41,7 +47,7 @@ export async function loadAlertState() {
     const data = JSON.parse(raw);
     for (const [key, entry] of Object.entries(data?.regions ?? {})) {
       if (typeof entry?.confirmed === 'boolean' && Number.isFinite(entry?.at)) {
-        _states.set(key, { confirmed: entry.confirmed, at: entry.at });
+        _states.set(key, withLevel({ confirmed: entry.confirmed, at: entry.at }, entry.confirmed ? entry.level : null));
       }
     }
     console.log(`[alert-state] Loaded ${_states.size} region(s)`);
@@ -54,14 +60,14 @@ export async function loadAlertState() {
   return getAlertState();
 }
 
-/** @returns {Record<string, { confirmed: boolean, at: number }>} */
+/** @returns {Record<string, { confirmed: boolean, at: number, level?: 'red'|'yellow' }>} */
 export function getAlertState() {
   return Object.fromEntries([..._states].map(([k, v]) => [k, { ...v }]));
 }
 
 /** Records a confirmed transition and schedules an atomic write. */
-export function recordAlertState(cacheKey, confirmed, at = Date.now()) {
-  _states.set(String(cacheKey), { confirmed: Boolean(confirmed), at });
+export function recordAlertState(cacheKey, confirmed, at = Date.now(), level = null) {
+  _states.set(String(cacheKey), withLevel({ confirmed: Boolean(confirmed), at }, confirmed ? level : null));
 
   const snapshot = JSON.stringify(
     { version: FORMAT_VERSION, regions: Object.fromEntries(_states) },

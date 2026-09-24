@@ -20,6 +20,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { isAreaOnly } from './threatMeta.js';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const FORMAT_VERSION = 1;
@@ -156,6 +158,13 @@ export function createNightLog({
         }
         track.lastAt = at;
         if (count > track.count) { track.count = count; changed = true; }
+        if (isAreaOnly(t)) {
+          // Its lat/lon is the oblast's centroid, not a sighting: stored as a
+          // sample it would count as having flown over whatever city sits near
+          // the middle of the oblast. Only the oblast it named is kept.
+          if (t.region && track.areaRegion !== t.region) { track.areaRegion = t.region; changed = true; }
+          continue;
+        }
         if (t.locality && !track.localities.includes(t.locality) && track.localities.length < 12) {
           track.localities.push(t.locality);
           changed = true;

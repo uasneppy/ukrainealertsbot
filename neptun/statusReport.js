@@ -9,6 +9,7 @@
  */
 
 import { esc, b } from './telegramFormat.js';
+import { DEFAULT_REST_STALE_MS as REST_STALE_MS } from './liveState.js';
 
 const ago = (timestamp, now) => {
   if (!timestamp) return 'ніколи';
@@ -22,6 +23,7 @@ const ago = (timestamp, now) => {
  * @param {object} facts
  * @param {boolean} facts.streamConnected
  * @param {number}  facts.streamAgeMs
+ * @param {number|null} [facts.apiDataAgeMs] age of the API snapshot by its serverTime
  * @param {number}  facts.geoAgeMs
  * @param {object}  facts.ai            from getAiHealth()
  * @param {object}  facts.renderQueue   from renderQueueStats()
@@ -46,10 +48,16 @@ export function formatStatusReport(facts = {}) {
   );
 
   // The map path reads the API on every request, so this is what actually
-  // decides whether a reply is possible.
+  // decides whether a reply is possible. The data age is the other half: a
+  // cached answer arrives fast, and past REST_STALE_MS the map path stops
+  // trusting it (see liveState.js).
+  const dataAge = Number.isFinite(facts.apiDataAgeMs) ? facts.apiDataAgeMs : null;
+  const apiStale = dataAge != null && dataAge > REST_STALE_MS;
   lines.push(
-    `${facts.apiOk ? '🟢' : '🔴'} NEPTUN API: ${
-      facts.apiOk ? `відповідає (${facts.apiLatencyMs} мс)` : `недоступний — ${esc(facts.apiError ?? '?')}`
+    `${!facts.apiOk ? '🔴' : apiStale ? '🟠' : '🟢'} NEPTUN API: ${
+      facts.apiOk
+        ? `відповідає (${facts.apiLatencyMs} мс)${dataAge != null ? `, дані ${Math.round(dataAge / 1000)} с тому` : ''}`
+        : `недоступний — ${esc(facts.apiError ?? '?')}`
     }`
   );
 

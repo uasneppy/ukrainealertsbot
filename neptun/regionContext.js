@@ -7,8 +7,16 @@
 
 import {
   THREAT_EMOJI,
+  ALERT_LEVEL_RANK,
+  ALERT_LEVEL_EMOJI,
+  ALERT_LEVEL_WORDS,
   normalizeAlertKey,
   extractAlertKeys,
+  entryAlertLevel,
+  entryAlertReasons,
+  maxAlertLevel,
+  isAreaOnly,
+  groupSize,
   threatNature,
   threatDisplayName,
 } from './threatMeta.js';
@@ -130,6 +138,18 @@ export function fmtKyivTime(iso) {
   return d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kyiv' });
 }
 
+/**
+ * "~31 км", or "~31 км (±10)" when NEPTUN's own uncertainty is a material part
+ * of the distance. A bare "~31 км" for a position NEPTUN places within ±10 km
+ * reads as a measurement it isn't; ±4 on a 96 km distance is noise and stays
+ * off the line.
+ */
+export function formatDistance(distanceKm, uncertaintyKm) {
+  const d = Math.round(distanceKm);
+  const u = Number.isFinite(uncertaintyKm) ? Math.round(uncertaintyKm) : 0;
+  return u >= 5 && u * 4 >= d ? `~${d} км (±${u})` : `~${d} км`;
+}
+
 // ── Region status ─────────────────────────────────────────────────────────────
 
 const describeThreat = (t, { distanceKm, direction, directionShort, inRegion, bearingFromRegion = null }) => {
@@ -137,6 +157,10 @@ const describeThreat = (t, { distanceKm, direction, directionShort, inRegion, be
   return {
     id: t?.id,
     type,
+    // Objects this one track stands for («Група БпЛА (5+)» → 5).
+    count: groupSize(t),
+    uncertaintyKm: Number.isFinite(t?.uncertaintyKm) ? t.uncertaintyKm : null,
+    areaOnly: isAreaOnly(t),
     // 'advisory' is a warning that something may be used; 'tracked' is an
     // object with a position. The name already reflects it ("Загроза
     // балістики" vs "Балістика") so no caller can print a warning as a missile.
@@ -146,17 +170,19 @@ const describeThreat = (t, { distanceKm, direction, directionShort, inRegion, be
     // NEPTUN sets `destination` when lat/lon is where the target is *heading*
     // ("курсом на Обухів"), not where it is. "над Обухів" would then put it
     // overhead a town it hasn't reached.
-    destination: t?.destination === true,
-    approx: t?.positionQuality === 'approx' || t?.lifecycle === 'uncertain',
+    destination: t?.destination === true && !isAreaOnly(t),
+    approx: isAreaOnly(t) || t?.positionQuality === 'approx' || t?.lifecycle === 'uncertain',
     title: t?.title ?? '',
     locality: t?.locality ?? '',
     sourceRegion: t?.region ?? '',
-    lat: t?.lat,
-    lon: t?.lon,
-    heading: Number.isFinite(t?.heading) ? t.heading : null,
-    headingWord: Number.isFinite(t?.heading) ? bearingToWord(t.heading) : '',
-    headingShort: Number.isFinite(t?.heading) ? bearingToWord(t.heading, { short: true }) : '',
-    distanceKm: Math.round(distanceKm),
+    // An area-only track has no position — the feed's lat/lon is the oblast
+    // centroid — so it has no coordinates, course or distance here either.
+    lat: isAreaOnly(t) ? null : t?.lat,
+    lon: isAreaOnly(t) ? null : t?.lon,
+    heading: Number.isFinite(t?.heading) && !isAreaOnly(t) ? t.heading : null,
+    headingWord: Number.isFinite(t?.heading) && !isAreaOnly(t) ? bearingToWord(t.heading) : '',
+    headingShort: Number.isFinite(t?.heading) && !isAreaOnly(t) ? bearingToWord(t.heading, { short: true }) : '',
+    distanceKm: Number.isFinite(distanceKm) ? Math.round(distanceKm) : null,
     direction,
     directionShort,
     // Numeric bearing from the region to the threat — lets the watcher tell an
@@ -172,6 +198,52 @@ const minSince = (entries) => {
     .map((e) => new Date(e?.since ?? '').getTime())
     .filter((t) => Number.isFinite(t) && t > 0);
   return times.length ? new Date(Math.min(...times)).toISOString() : '';
+};
+
+/** An alert entry as the report and the watcher use it. */
+const describeAlertEntry = (entry, fallbackKey = '') => {
+  const { level, known } = entryAlertLevel(entry);
+  const key = normalizeAlertKey(entry) || fallbackKey;
+  return {
+    key,
+    name: (entry && typeof entry === 'object' && entry.name) || key,
+    since: (entry && typeof entry === 'object' && entry.since) || '',
+    level,
+    levelKnown: known,
+    reasons: entryAlertReasons(entry),
+  };
+};
+
+/**
+ * The level that applies across several entries, and the reasons given at that
+ * level — a yellow district's "Дронова загроза" is not the reason a region is
+ * red, so it is left out.
+ */
+const summariseLevel = (entries) => {
+  let level = null;
+  for (const e of entries) level = maxAlertLevel(level, e.level);
+  const top = entries.filter((e) => e.level === level);
+  return {
+    level,
+    levelKnown: top.some((e) => e.levelKnown),
+    reasons: [...new Set(top.flatMap((e) => e.reasons))],
+  };
+};
+
+/**
+ * Does an area-only track (one that names only an oblast) concern this region?
+ * An oblast: when it is that oblast. A city: when the city is in it — by its
+ * parent key, or by lying inside the oblast's outer boundary, which is how
+ * «Ракета на Київщину» reaches Київ, an enclave with its own alert key.
+ */
+const areaConcerns = (t, region, geo) => {
+  const key = normalizeAlertKey(t?.region);
+  if (!key) return false;
+  if (region.kind === 'oblast') return key === region.geoKey;
+  if (region.kind !== 'city') return false;
+  if (key === region.oblastGeoKey) return true;
+  const feature = findOblastFeature(geo, key);
+  return feature ? pointInFeature(region.lat, region.lon, feature) : false;
 };
 
 /**
@@ -190,14 +262,24 @@ export function buildRegionStatus({ region, threats = [], alerts = {}, geo = {} 
 
   const threatsIn = [];
   const threatsNear = [];
+  // Area-only tracks that name this region's oblast. Kept apart from in/near
+  // so nothing that sorts, frames or measures by distance ever sees them.
+  const threatsArea = [];
   let alertScope = null;
   let alertSince = '';
   let alertedRaions = [];
+  let oblastAlert = null;
+  let applicable = [];
   let refPoint = null;
 
   const validThreats = threats.filter(
-    (t) => Number.isFinite(t?.lat) && Number.isFinite(t?.lon)
+    (t) => Number.isFinite(t?.lat) && Number.isFinite(t?.lon) && !isAreaOnly(t)
   );
+  for (const t of threats) {
+    if (isAreaOnly(t) && areaConcerns(t, region, geo)) {
+      threatsArea.push(describeThreat(t, { distanceKm: null, direction: '', directionShort: '', inRegion: true }));
+    }
+  }
 
   if (region.kind === 'oblast') {
     const feature = findOblastFeature(geo, region.geoKey);
@@ -209,15 +291,19 @@ export function buildRegionStatus({ region, threats = [], alerts = {}, geo = {} 
     const oblastEntry = oblastEntries.find((e) => normalizeAlertKey(e) === region.geoKey) ?? null;
     alertedRaions = raionEntries
       .filter((e) => e && typeof e === 'object' && normalizeAlertKey(e.oblast) === region.geoKey)
-      .map((e) => ({ key: normalizeAlertKey(e), name: e.name || normalizeAlertKey(e), since: e.since ?? '' }));
+      .map((e) => describeAlertEntry(e));
 
     if (oblastEntry) {
       alertScope = 'oblast';
       alertSince = oblastEntry.since ?? '';
+      oblastAlert = describeAlertEntry(oblastEntry, region.geoKey);
     } else if (alertedRaions.length) {
       alertScope = 'raions';
       alertSince = minSince(alertedRaions);
     }
+    // Everyone in the oblast is under the oblast-wide level, and the people in
+    // a red district inside a yellow oblast are under red.
+    applicable = [...(oblastAlert ? [oblastAlert] : []), ...alertedRaions];
 
     const NEARBY_KM = 90;
     for (const t of validThreats) {
@@ -255,20 +341,32 @@ export function buildRegionStatus({ region, threats = [], alerts = {}, geo = {} 
       ? oblastEntries.find((e) => normalizeAlertKey(e) === parentOblastKey) ?? null
       : null;
 
-    // Precedence: own city alert → full parent oblast → city's raion. A full
-    // oblast alert subsumes raion entries (feeds often list both at once).
-    if (cityEntry) {
-      alertScope = 'city';
-      alertSince = cityEntry.since ?? '';
-    } else if (oblastEntry) {
-      alertScope = 'oblast';
-      alertSince = oblastEntry.since ?? '';
-    } else if (raionEntry && typeof raionEntry === 'object') {
-      alertScope = 'raion';
-      alertSince = raionEntry.since ?? '';
-      alertedRaions = [{ key: region.raionKey, name: raionEntry.name || region.raionKey, since: raionEntry.since ?? '' }];
+    // Every entry that covers the city: its own alert, the whole parent
+    // oblast, its raion. The most severe one is what the city is under, so it
+    // also decides which scope the report names; among equals the old
+    // precedence holds (own city → full oblast → raion), because a full oblast
+    // alert subsumes raion entries (feeds often list both at once).
+    const covering = [
+      cityEntry && { scope: 'city', entry: describeAlertEntry(cityEntry, cityKey) },
+      oblastEntry && { scope: 'oblast', entry: describeAlertEntry(oblastEntry, parentOblastKey) },
+      raionEntry && typeof raionEntry === 'object' && { scope: 'raion', entry: describeAlertEntry(raionEntry, region.raionKey) },
+    ].filter(Boolean);
+    let chosen = null;
+    for (const c of covering) {
+      if (!chosen || ALERT_LEVEL_RANK[c.entry.level] > ALERT_LEVEL_RANK[chosen.entry.level]) chosen = c;
+    }
+
+    if (chosen) {
+      alertScope = chosen.scope;
+      alertSince = chosen.entry.since;
+      if (chosen.scope === 'raion') {
+        alertedRaions = [{ ...chosen.entry, key: region.raionKey, name: chosen.entry.name || region.raionKey }];
+      }
+      applicable = covering.map((c) => c.entry);
     } else if (region.raionKey && raionKeySet.has(region.raionKey)) {
+      // A bare-string raion entry: an alert with no level or time attached.
       alertScope = 'raion';
+      applicable = [describeAlertEntry(region.raionKey)];
     }
 
     for (const t of validThreats) {
@@ -289,14 +387,22 @@ export function buildRegionStatus({ region, threats = [], alerts = {}, geo = {} 
   threatsIn.sort((a, b) => a.distanceKm - b.distanceKm);
   threatsNear.sort((a, b) => a.distanceKm - b.distanceKm);
 
+  const level = alertScope != null ? summariseLevel(applicable) : { level: null, levelKnown: false, reasons: [] };
+
   return {
     region,
     alertActive: alertScope != null,
     alertScope, // 'oblast' | 'raions' | 'city' | 'raion' | null
     alertSince,
+    // 'red' | 'yellow' | null — the most severe level covering the region.
+    alertLevel: level.level,
+    alertLevelKnown: level.levelKnown,
+    alertReasons: level.reasons,
+    oblastAlert,
     alertedRaions,
     threatsIn,
     threatsNear,
+    threatsArea,
     refPoint,
   };
 }
@@ -315,20 +421,59 @@ const PLAIN = { esc: (s) => String(s ?? ''), b: (s) => String(s ?? ''), i: (s) =
 const RICH = { esc, b, i };
 const fmt = (html) => (html ? RICH : PLAIN);
 
+const levelEmoji = (level) => ALERT_LEVEL_EMOJI[level] ?? ALERT_LEVEL_EMOJI.red;
+
+// What the alert is about, in the feed's own words ("Ракетна загроза (червоний
+// рівень)"); the bare level when the feed gave a level but no reason; nothing
+// when it gave neither — never a colour the feed didn't state.
+const reasonLine = ({ reasons = [], level, levelKnown }, f) => {
+  if (reasons.length) return f.i(reasons.join(' · '));
+  if (levelKnown && ALERT_LEVEL_WORDS[level]) {
+    const words = ALERT_LEVEL_WORDS[level];
+    return f.i(words[0].toUpperCase() + words.slice(1));
+  }
+  return '';
+};
+
+// Districts grouped by level, most severe first: "🔴 Тривога у районах: …"
+// and "🟡 Тривога у районах: …" as separate lines, each with its reason.
+const raionGroupLines = (raions, f, { max = 5 } = {}) => {
+  const lines = [];
+  for (const level of ['red', 'yellow']) {
+    const group = raions.filter((r) => r.level === level);
+    if (!group.length) continue;
+    const parts = group.slice(0, max).map((r) => `${f.esc(r.name)}${f.i(sinceSuffix(r.since))}`);
+    const extra = group.length > max ? ` та ще ${group.length - max}` : '';
+    lines.push(`${levelEmoji(level)} ${f.b('Тривога у районах:')} ${parts.join(', ')}${extra}`);
+    const reason = reasonLine(summariseLevel(group), f);
+    if (reason) lines.push(reason);
+  }
+  return lines;
+};
+
 const alertLine = (status, f) => {
-  const { region, alertScope, alertSince, alertedRaions } = status;
+  const { region, alertScope, alertSince, alertedRaions, oblastAlert } = status;
+  const overall = { reasons: status.alertReasons, level: status.alertLevel, levelKnown: status.alertLevelKnown };
+  const head = (text, level = status.alertLevel) => `${levelEmoji(level)} ${f.b(text)}${f.i(sinceSuffix(alertSince))}`;
+  const withReason = (line, summary = overall) => [line, reasonLine(summary, f)].filter(Boolean).join('\n');
   switch (alertScope) {
-    case 'oblast':
-      return `🔴 ${f.b('Тривога — вся область')}${f.i(sinceSuffix(alertSince))}`;
-    case 'city':
-      return `🔴 ${f.b(`Тривога у м. ${region.name}`)}${f.i(sinceSuffix(alertSince))}`;
-    case 'raion':
-      return `🔴 ${f.b(`Тривога — ${alertedRaions[0]?.name ?? 'район міста'}`)}${f.i(sinceSuffix(alertSince))}`;
-    case 'raions': {
-      const parts = alertedRaions.slice(0, 5).map((r) => `${f.esc(r.name)}${f.i(sinceSuffix(r.since))}`);
-      const extra = alertedRaions.length > 5 ? ` та ще ${alertedRaions.length - 5}` : '';
-      return `🔴 ${f.b('Тривога у районах:')} ${parts.join(', ')}${extra}`;
+    case 'oblast': {
+      // A city under its parent oblast's alert: one line, like its own alert.
+      if (!oblastAlert) return withReason(head('Тривога — вся область'));
+      // The oblast itself: the oblast-wide line carries that entry's own level,
+      // and a district inside it that is more severe (red inside yellow) gets
+      // its own line — it is the part of the oblast that must go to shelter.
+      const lines = [withReason(head('Тривога — вся область', oblastAlert.level), oblastAlert)];
+      const rank = ALERT_LEVEL_RANK[oblastAlert.level];
+      lines.push(...raionGroupLines(alertedRaions.filter((r) => ALERT_LEVEL_RANK[r.level] > rank), f));
+      return lines.join('\n');
     }
+    case 'city':
+      return withReason(head(`Тривога у м. ${region.name}`));
+    case 'raion':
+      return withReason(head(`Тривога — ${alertedRaions[0]?.name ?? 'район міста'}`));
+    case 'raions':
+      return raionGroupLines(alertedRaions, f).join('\n');
     default:
       return `🟢 ${f.b('Тривоги немає')}`;
   }
@@ -350,30 +495,46 @@ const threatCourse = (t, short) => {
   return `курс ${short ? t.headingShort : t.headingWord}`;
 };
 
+// "БпЛА ×5" for a group, so one marker doesn't read as one drone.
+const threatName = (t) => (t.count > 1 ? `${t.name} ×${t.count}` : t.name);
+
 const threatLineIn = (t, { short = false, f = PLAIN } = {}) =>
-  `• ${[`${t.emoji} ${f.b(t.name)}`, f.esc(threatPlace(t)), f.esc(threatCourse(t, short))].filter(Boolean).join(' · ')}`;
+  `• ${[`${t.emoji} ${f.b(threatName(t))}`, f.esc(threatPlace(t)), f.esc(threatCourse(t, short))].filter(Boolean).join(' · ')}`;
 
 const threatLineNear = (t, { short = false, f = PLAIN } = {}) => {
   const dir = short ? t.directionShort : t.direction;
   // Locality alone: the parenthetical oblast doubled the line length and the
   // map already shows which oblast it's over.
-  const distance = `~${t.distanceKm} км${dir ? ` на ${dir}` : ''}`;
-  return `• ${[`${t.emoji} ${f.b(t.name)}`, distance, f.esc(threatCourse(t, short)), f.esc(threatPlace(t))].filter(Boolean).join(' · ')}`;
+  const distance = `${formatDistance(t.distanceKm, t.uncertaintyKm)}${dir ? ` на ${dir}` : ''}`;
+  return `• ${[`${t.emoji} ${f.b(threatName(t))}`, distance, f.esc(threatCourse(t, short)), f.esc(threatPlace(t))].filter(Boolean).join(' · ')}`;
 };
+
+// An area-only track: the oblast it was reported for and nothing else — no
+// distance, no direction, no course, because there is no point to measure from.
+const threatLineArea = (t, { f = PLAIN } = {}) =>
+  `• ${[`${t.emoji} ${f.b(threatName(t))}`, f.esc(t.sourceRegion || t.locality)].filter(Boolean).join(' · ')}`;
 
 /**
  * The body as an array of blocks. Each block is a group of lines that belong
  * together (the alert line, the in-region list, the nearby list); the callers
  * join blocks with a blank line so the sections breathe.
  */
-const statusBlocks = (status, { maxIn = 8, maxNear = 5, short = false, html = false } = {}) => {
+const statusBlocks = (status, { maxIn = 8, maxNear = 5, maxArea = 3, short = false, html = false } = {}) => {
   const f = fmt(html);
   const blocks = [alertLine(status, f)];
+  const area = status.threatsArea ?? [];
 
   if (status.threatsIn.length) {
     const lines = [`⚠️ ${f.b(`У регіоні — ${status.threatsIn.length}`)}`];
     status.threatsIn.slice(0, maxIn).forEach((t) => lines.push(threatLineIn(t, { short, f })));
     if (status.threatsIn.length > maxIn) lines.push(f.i(`…та ще ${status.threatsIn.length - maxIn}`));
+    blocks.push(lines.join('\n'));
+  }
+
+  if (area.length) {
+    const lines = [`🗺 ${f.b(`По області, місце невідоме — ${area.length}`)}`];
+    area.slice(0, maxArea).forEach((t) => lines.push(threatLineArea(t, { f })));
+    if (area.length > maxArea) lines.push(f.i(`…та ще ${area.length - maxArea}`));
     blocks.push(lines.join('\n'));
   }
 
@@ -384,7 +545,7 @@ const statusBlocks = (status, { maxIn = 8, maxNear = 5, short = false, html = fa
     blocks.push(lines.join('\n'));
   }
 
-  if (!status.threatsIn.length && !status.threatsNear.length) {
+  if (!status.threatsIn.length && !status.threatsNear.length && !area.length) {
     blocks.push('✅ Загроз у регіоні та поблизу не зафіксовано');
   }
 
@@ -421,12 +582,14 @@ export function buildFocusCaption(status, date = new Date(), { extra = '' } = {}
 
   let maxIn = 7;
   let maxNear = 4;
+  let maxArea = 3;
   const build = () =>
-    [header, ...statusBlocks(status, { maxIn, maxNear, short: true, html: true }), extra, footer].filter(Boolean).join('\n\n');
+    [header, ...statusBlocks(status, { maxIn, maxNear, maxArea, short: true, html: true }), extra, footer].filter(Boolean).join('\n\n');
   let caption = build();
-  while (caption.length > 1000 && (maxIn > 1 || maxNear > 0)) {
+  while (caption.length > 1000 && (maxIn > 1 || maxNear > 0 || maxArea > 1)) {
     if (maxIn > 1) maxIn -= 1;
     if (maxNear > 0) maxNear -= 1;
+    if (maxArea > 1) maxArea -= 1;
     caption = build();
   }
   return caption;
